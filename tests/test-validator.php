@@ -64,7 +64,7 @@ if ( ! function_exists( 'get_post_type_object' ) ) {
 	}
 }
 
-foreach ( [ 'register_rest_route', 'sanitize_key', 'rest_ensure_response', 'get_permalink', 'get_post_meta', 'get_option', 'get_posts', 'add_action', 'add_filter', 'esc_url_raw', 'wp_parse_url' ] as $stub ) {
+foreach ( [ 'register_rest_route', 'sanitize_key', 'rest_ensure_response', 'get_permalink', 'get_post_meta', 'get_option', 'get_posts', 'add_action', 'add_filter', 'esc_url_raw', 'wp_parse_url', 'get_current_user_id' ] as $stub ) {
 	if ( ! function_exists( $stub ) ) {
 		eval( "function {$stub}() { return null; }" ); // phpcs:ignore Squiz.PHP.Eval.Discouraged
 	}
@@ -73,6 +73,14 @@ foreach ( [ 'register_rest_route', 'sanitize_key', 'rest_ensure_response', 'get_
 require_once __DIR__ . '/../includes/class-bricks-adapter.php';
 require_once __DIR__ . '/../includes/class-validator.php';
 require_once __DIR__ . '/../includes/class-rest-content.php';
+
+/*
+ * Chargé pour une seule règle, qui n'a pourtant pas de plus mauvais endroit
+ * pour être vérifiée : la reprise de l'identifiant d'une classe existante. La
+ * méthode ne touche ni à WordPress ni à la base — elle décide simplement de ce
+ * qui part en base, et son erreur détache toutes les classes de toutes les pages.
+ */
+require_once __DIR__ . '/../includes/class-rest-bricks.php';
 
 use Anode\Bridge\Validator;
 
@@ -316,11 +324,79 @@ test(
 );
 
 test(
+	'vider les valeurs d’attributs ne fait pas perdre les ressources distantes',
+	function (): void {
+		/*
+		 * Le contrôle des gestionnaires lit une copie où les valeurs entre
+		 * guillemets sont vidées — sans quoi un « > » dedans lui cache la fin de
+		 * la balise. Mais une ressource distante **est** une valeur : la chercher
+		 * sur cette même copie reviendrait à ne plus jamais la voir. Les deux
+		 * lectures sont donc séparées, et ce test le prouve.
+		 */
+		foreach ( [
+			'<img src="https://cdn.exemple.com/a.jpg">',
+			'<img srcset="/a.jpg 1x, https://cdn.exemple.com/a2.jpg 2x">',
+			'<div style="background: url(https://cdn.exemple.com/f.png)"></div>',
+		] as $markup ) {
+			assert_error(
+				Validator::elements( html_element( $markup ) ),
+				'distante',
+				"« {$markup} » aurait dû être refusé"
+			);
+		}
+	}
+);
+
+test(
+	'une phrase contenant « on … = » n’est pas prise pour un gestionnaire',
+	function (): void {
+		/*
+		 * Le contrôle s'applique à tout réglage de texte libre : un motif non
+		 * ancré sur une balise refuserait de la prose parfaitement légitime.
+		 */
+		foreach ( [
+			'<p>Les ondes = 3 hertz</p>',
+			'<p>bon = mauvais, on = off</p>',
+			'<p>Une phrase sans balise où on = 1</p>',
+		] as $markup ) {
+			$result = Validator::elements( html_element( $markup ) );
+
+			assert_true( is_array( $result ), "« {$markup} » aurait dû passer" );
+		}
+	}
+);
+
+test(
 	'un gestionnaire d’événement en attribut est refusé',
 	function (): void {
-		$result = Validator::elements( html_element( '<svg onload="alert(1)"></svg>' ) );
+		/*
+		 * Deux formes échappent chacune à un motif pris seul : l'espace avant le
+		 * signe égal, et un attribut précédent qui contient un « > » — il ferme la
+		 * balise pour une expression régulière, pas pour le navigateur.
+		 *
+		 * C'est leur **combinaison** qui a réellement traversé le contrôle, et ce
+		 * cas manquait ici : chacune était couverte séparément, aucune ne l'était
+		 * ensemble. Refuser un test de plus par forme n'aurait rien changé ; c'est
+		 * le croisement qu'il fallait écrire.
+		 */
+		$cas = [
+			'<svg onload="alert(1)"></svg>',
+			'<svg onload ="alert(1)"></svg>',
+			'<img alt=">" onerror="alert(1)">',
+			'<img alt=">" onerror ="alert(1)">',
+			"<img alt='>' onerror ='alert(1)'>",
+			"<img src=\"/a.jpg\" onerror\n=\"alert(1)\">",
+			'<img src="/a.jpg" ONERROR="alert(1)">',
+			'<div data-x=">"><span onclick="x()">a</span></div>',
+		];
 
-		assert_error( $result, 'gestionnaires', 'un attribut on… doit être refusé' );
+		foreach ( $cas as $markup ) {
+			assert_error(
+				Validator::elements( html_element( $markup ) ),
+				'gestionnaires',
+				"« {$markup} » aurait dû être refusé"
+			);
+		}
 	}
 );
 
@@ -357,6 +433,118 @@ test(
 		$result = Validator::elements( html_element( '<?php system("id"); ?>' ) );
 
 		assert_error( $result, 'PHP', 'du PHP doit être refusé' );
+	}
+);
+
+test(
+	'un script dans le texte d’un titre est refusé',
+	function (): void {
+		$result = Validator::elements(
+			[
+				[
+					'id'       => 'aaa111',
+					'name'     => 'heading',
+					'parent'   => 0,
+					'children' => [],
+					'settings' => [ 'text' => 'Bonjour<script>alert(1)</script>' ],
+				],
+			]
+		);
+
+		assert_error( $result, 'script', 'un heading rend son texte tel quel : le contrôle ne peut pas dépendre du type d’élément' );
+	}
+);
+
+test(
+	'un script dans un réglage imbriqué est refusé',
+	function (): void {
+		// Le libellé d'un onglet, le titre d'un accordéon : les réglages de
+		// Bricks se nichent souvent dans une répétition.
+		$result = Validator::elements(
+			[
+				[
+					'id'       => 'aaa111',
+					'name'     => 'tabs',
+					'parent'   => 0,
+					'children' => [],
+					'settings' => [ 'tabs' => [ [ 'title' => '<script>alert(1)</script>' ] ] ],
+				],
+			]
+		);
+
+		assert_error( $result, 'script', 'un réglage imbriqué est rendu comme les autres' );
+	}
+);
+
+test(
+	'les ressources distantes déguisées sont refusées',
+	function (): void {
+		$cas = [
+			'<img srcset="local.jpg 1x, https://cdn.exemple.com/x.jpg 2x" alt="">',
+			'<video poster="https://cdn.exemple.com/p.jpg"></video>',
+			'<div style="background-image:url(https://cdn.exemple.com/f.png)"></div>',
+			'<style>@import url(https://polices.exemple.com/p.css);</style>',
+			'<style>@import "https://polices.exemple.com/p.css";</style>',
+			'<svg><use href="https://cdn.exemple.com/i.svg#x"/></svg>',
+			'<img src="//cdn.exemple.com/x.gif" alt="">',
+		];
+
+		foreach ( $cas as $markup ) {
+			assert_error(
+				Validator::elements( html_element( $markup ) ),
+				'zéro dépendance',
+				"« {$markup} » aurait dû être refusé"
+			);
+		}
+	}
+);
+
+test(
+	'une balise base est refusée',
+	function (): void {
+		// Son href ne charge rien : il réécrit toutes les URL relatives de la page.
+		assert_error(
+			Validator::elements( html_element( '<base href="https://exemple.com/">' ) ),
+			'base',
+			'une balise base doit être refusée'
+		);
+	}
+);
+
+test(
+	'un texte enrichi légitime reste accepté',
+	function (): void {
+		/*
+		 * Le contrôle porte désormais sur de la prose : un refus injustifié
+		 * bloquerait une écriture parfaitement valide. Les trois derniers cas sont
+		 * ceux que les motifs d'origine refusaient à tort — un lien externe n'est
+		 * pas une dépendance, une espace avant le deux-points est une règle
+		 * typographique française, et « ondes = » n'est pas un gestionnaire
+		 * d'événement.
+		 */
+		$cas = [
+			'<strong>Bonjour</strong> et bienvenue',
+			'Site : <a href="https://www.exemple.fr">exemple.fr</a>',
+			'Programme <b>web</b> : JavaScript : les bases',
+			'Puissance des <b>ondes</b> = 3 W',
+			'<img src="/wp-content/uploads/logo.svg" alt="">',
+		];
+
+		foreach ( $cas as $texte ) {
+			$result = Validator::elements(
+				[
+					[
+						'id'       => 'aaa111',
+						'name'     => 'text',
+						'parent'   => 0,
+						'children' => [],
+						'settings' => [ 'text' => $texte ],
+					],
+				]
+			);
+
+			assert_true( is_array( $result ), "« {$texte} » aurait dû passer, il a été refusé" );
+		}
 	}
 );
 
@@ -477,6 +665,67 @@ test(
 	}
 );
 
+test(
+	'« %root% » est refusé dans le CSS personnalisé d’une classe',
+	function (): void {
+		assert_error(
+			Validator::global_classes(
+				[ [ 'name' => 'c-hero', 'settings' => [ '_cssCustom' => '%root% { display: grid; }' ] ] ]
+			),
+			'%root%',
+			'le jeton n’est résolu que par le builder : la feuille sort littérale, donc cassée'
+		);
+	}
+);
+
+test(
+	'« %root% » est refusé dans un sous-sélecteur',
+	function (): void {
+		assert_error(
+			Validator::global_classes(
+				[
+					[
+						'name'      => 'c-hero',
+						'settings'  => [],
+						'selectors' => [
+							[ 'selector' => 'svg', 'settings' => [ '_cssCustom' => '%root% svg { width: 1em; }' ] ],
+						],
+					],
+				]
+			),
+			'%root%',
+			'un sous-sélecteur sort dans la même feuille que le reste'
+		);
+	}
+);
+
+test(
+	'le mode replace conserve l’identifiant d’une classe déjà connue',
+	function (): void {
+		/*
+		 * Le cas qui vide un site sans rien changer aux pages : les éléments
+		 * désignent les classes par identifiant, et le validateur en génère un neuf
+		 * dès qu'il n'en reçoit pas.
+		 */
+		$existant = [ [ 'id' => 'abc123', 'name' => 'c-hero', 'settings' => [] ] ];
+		$entrant  = Validator::global_classes( [ [ 'name' => 'c-hero' ], [ 'name' => 'c-hero__title' ] ] );
+
+		assert_true( is_array( $entrant ), 'les deux classes doivent être valides' );
+		assert_true( 'abc123' !== $entrant[0]['id'], 'le validateur attribue bien un identifiant neuf' );
+
+		// Depuis PHP 8.1, la réflexion atteint une méthode privée sans autorisation
+		// préalable : `setAccessible()` ne servirait plus qu'à émettre un avis.
+		$methode = new ReflectionMethod( \Anode\Bridge\Rest_Bricks::class, 'keep_existing_ids' );
+
+		[ $resultat, $ajoutees, $mises_a_jour ] = $methode->invoke( new \Anode\Bridge\Rest_Bricks(), $existant, $entrant );
+
+		assert_true( 2 === count( $resultat ), 'la liste finale est bien la liste entrante' );
+		assert_true( 'abc123' === $resultat[0]['id'], 'une classe reconnue par son nom garde son identifiant' );
+		assert_true( 'c-hero__title' === $resultat[1]['name'], 'l’ordre de la liste entrante est conservé' );
+		assert_true( 1 === $ajoutees && 1 === $mises_a_jour, 'le compte rendu distingue l’ajout de la mise à jour' );
+	}
+);
+
 /* --- Variables ------------------------------------------------------ */
 
 echo "\nVariables globales\n";
@@ -532,6 +781,204 @@ test(
 
 		assert_true( is_array( $result ), 'structure attendue' );
 		assert_true( '1.5' === $result[0]['value'], 'la valeur doit être convertie en chaîne' );
+	}
+);
+
+/* --- Composants ----------------------------------------------------- */
+
+echo "\nValidation des composants\n";
+
+/**
+ * Composant minimal valide : une section, un titre, une propriété reliée.
+ *
+ * @param array<string, mixed> $surcharge Champs à remplacer.
+ *
+ * @return array<string, mixed>
+ */
+function composant_valide( array $surcharge = [] ): array {
+	return array_merge(
+		[
+			'id'         => 'hero01',
+			'label'      => 'Section hero',
+			'elements'   => [
+				[ 'id' => 'hero01', 'name' => 'section', 'parent' => 0, 'children' => [ 'titre1' ], 'settings' => [] ],
+				[ 'id' => 'titre1', 'name' => 'heading', 'parent' => 'hero01', 'children' => [], 'settings' => [ 'text' => 'Titre' ] ],
+			],
+			'properties' => [
+				[
+					'id'          => 'titre',
+					'label'       => 'Titre',
+					'type'        => 'text',
+					'connections' => [ 'titre1' => [ 'text' ] ],
+				],
+			],
+		],
+		$surcharge
+	);
+}
+
+test(
+	'un composant valide est accepté et normalisé',
+	function (): void {
+		$result = Validator::component( composant_valide() );
+
+		assert_true( is_array( $result ), 'structure attendue, erreur reçue' );
+		assert_true( 'hero01' === $result['id'], 'l’identifiant doit être conservé' );
+		assert_true( 'components' === $result['category'], 'une catégorie par défaut est posée' );
+		assert_true( 2 === count( $result['elements'] ), 'les deux éléments doivent survivre' );
+		assert_true(
+			[ 'titre1' => [ 'text' ] ] === $result['properties'][0]['connections'],
+			'la connexion doit être conservée telle quelle'
+		);
+	}
+);
+
+test(
+	'un composant sans nom est refusé',
+	function (): void {
+		assert_error(
+			Validator::component( composant_valide( [ 'label' => '  ' ] ) ),
+			'label',
+			'le nom est ce que voit l’éditeur du site'
+		);
+	}
+);
+
+test(
+	'un composant à plusieurs racines est refusé',
+	function (): void {
+		$elements   = composant_valide()['elements'];
+		$elements[] = [ 'id' => 'autre1', 'name' => 'section', 'parent' => 0, 'children' => [], 'settings' => [] ];
+
+		assert_error(
+			Validator::component( composant_valide( [ 'elements' => $elements ] ) ),
+			'éléments racine',
+			'Bricks ne rend que la première racine : les suivantes disparaissent en silence'
+		);
+	}
+);
+
+test(
+	'un identifiant de composant qui n’est pas celui de la racine est refusé',
+	function (): void {
+		assert_error(
+			Validator::component( composant_valide( [ 'id' => 'autre1' ] ) ),
+			'élément racine',
+			'Bricks retrouve la racine par l’identifiant du composant'
+		);
+	}
+);
+
+test(
+	'une connexion vers un élément absent est refusée',
+	function (): void {
+		assert_error(
+			Validator::component(
+				composant_valide(
+					[
+						'properties' => [
+							[ 'id' => 'titre', 'type' => 'text', 'connections' => [ 'fantome' => [ 'text' ] ] ],
+						],
+					]
+				)
+			),
+			'n’existe pas dans le composant',
+			'une connexion vers le vide donne une propriété qui ne fait rien'
+		);
+	}
+);
+
+test(
+	'une propriété sans connexion est refusée',
+	function (): void {
+		assert_error(
+			Validator::component(
+				composant_valide( [ 'properties' => [ [ 'id' => 'titre', 'type' => 'text' ] ] ] )
+			),
+			'aucune connexion',
+			'une propriété orpheline trompe l’éditeur du site'
+		);
+	}
+);
+
+test(
+	'un type de propriété inconnu est refusé',
+	function (): void {
+		assert_error(
+			Validator::component(
+				composant_valide(
+					[
+						'properties' => [
+							[ 'id' => 'titre', 'type' => 'wysiwyg', 'connections' => [ 'titre1' => [ 'text' ] ] ],
+						],
+					]
+				)
+			),
+			'type inconnu',
+			'un type inconnu produit un contrôle vide dans le builder'
+		);
+	}
+);
+
+test(
+	'une propriété dupliquée est refusée',
+	function (): void {
+		$property = [ 'id' => 'titre', 'type' => 'text', 'connections' => [ 'titre1' => [ 'text' ] ] ];
+
+		assert_error(
+			Validator::component( composant_valide( [ 'properties' => [ $property, $property ] ] ) ),
+			'dupliquée',
+			'deux propriétés du même nom : la seconde masque la première'
+		);
+	}
+);
+
+test(
+	'une instance de composant conserve son cid et ses valeurs',
+	function (): void {
+		$result = Validator::elements(
+			[
+				[
+					'id'         => 'inst01',
+					'name'       => 'section',
+					'parent'     => 0,
+					'children'   => [],
+					'settings'   => [],
+					'cid'        => 'hero01',
+					'properties' => [ 'titre' => 'Bonjour' ],
+				],
+			]
+		);
+
+		assert_true( is_array( $result ), 'structure attendue' );
+		assert_true( 'hero01' === $result[0]['cid'], 'le cid désigne le composant' );
+		assert_true(
+			[ 'titre' => 'Bonjour' ] === $result[0]['properties'],
+			'sans « properties », toutes les instances afficheraient la même valeur'
+		);
+	}
+);
+
+test(
+	'une valeur de propriété ne peut pas glisser de script dans une instance',
+	function (): void {
+		assert_error(
+			Validator::elements(
+				[
+					[
+						'id'         => 'inst01',
+						'name'       => 'section',
+						'parent'     => 0,
+						'children'   => [],
+						'settings'   => [],
+						'cid'        => 'hero01',
+						'properties' => [ 'icone' => '<svg><script>alert(1)</script></svg>' ],
+					],
+				]
+			),
+			'script',
+			'une propriété reliée à un élément « html » contournerait le contrôle du balisage'
+		);
 	}
 );
 

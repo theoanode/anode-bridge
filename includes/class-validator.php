@@ -147,14 +147,71 @@ final class Validator {
 			'settings' => $settings,
 		];
 
-		// Champs facultatifs conservés tels quels s'ils sont bien typés.
-		foreach ( [ 'label', 'themeStyle', 'component', 'cid', 'instanceId' ] as $optional ) {
+		/*
+		 * Champs facultatifs conservés tels quels s'ils sont bien typés.
+		 *
+		 * `cid` et `properties` forment une instance de composant : le premier
+		 * désigne le composant, le second porte les valeurs de ses propriétés.
+		 * Sans `properties`, une instance afficherait les valeurs par défaut du
+		 * composant sur toutes les pages.
+		 */
+		foreach ( [ 'label', 'themeStyle', 'component', 'cid', 'instanceId', 'properties' ] as $optional ) {
 			if ( isset( $element[ $optional ] ) && ( is_string( $element[ $optional ] ) || is_array( $element[ $optional ] ) ) ) {
 				$node[ $optional ] = $element[ $optional ];
 			}
 		}
 
+		/*
+		 * Les valeurs de propriétés atterrissent dans les réglages du composant,
+		 * élément « html » compris : elles doivent passer le même contrôle que
+		 * le balisage écrit en clair, sinon l'instance devient la porte dérobée
+		 * que la vérification de `settings.html` vient de fermer.
+		 */
+		if ( isset( $node['properties'] ) && is_array( $node['properties'] ) ) {
+			$verdict = self::check_free_text( $node['properties'], $id );
+
+			if ( $verdict instanceof \WP_Error ) {
+				return $verdict;
+			}
+		}
+
 		return $node;
+	}
+
+	/**
+	 * Contrôle récursivement les valeurs libres d'un élément.
+	 *
+	 * Employé pour les valeurs de propriétés d'une instance **et** pour les
+	 * réglages de n'importe quel élément : ce qui décide du danger est la valeur,
+	 * pas le type d'élément qui la porte.
+	 *
+	 * @param array<string, mixed> $values Valeurs de propriétés ou réglages.
+	 * @param string               $id     Identifiant de l'élément, pour les messages.
+	 */
+	private static function check_free_text( array $values, string $id ): bool|\WP_Error {
+		foreach ( $values as $value ) {
+			if ( is_array( $value ) ) {
+				$verdict = self::check_free_text( $value, $id );
+
+				if ( $verdict instanceof \WP_Error ) {
+					return $verdict;
+				}
+
+				continue;
+			}
+
+			if ( ! is_string( $value ) || ! str_contains( $value, '<' ) ) {
+				continue;
+			}
+
+			$verdict = self::check_raw_html( $value, $id );
+
+			if ( $verdict instanceof \WP_Error ) {
+				return $verdict;
+			}
+		}
+
+		return true;
 	}
 
 	/**
@@ -187,6 +244,23 @@ final class Validator {
 			}
 		}
 
+		/*
+		 * L'élément « html » n'est pas le seul à rendre son réglage tel quel : un
+		 * `heading`, un `text`, un libellé d'onglet, un titre d'accordéon en font
+		 * autant. Le contrôle ne portait que sur `name === 'html'` — un <script>
+		 * posé dans le titre d'un h1 partait donc en base et s'exécutait sur la
+		 * page, alors que le même balisage était refusé deux lignes plus haut.
+		 *
+		 * On suit donc la valeur, sous-tableaux compris (un lien, une répétition
+		 * d'onglets), et seulement quand elle contient un « < » : sans balise, il
+		 * n'y a rien à refuser.
+		 */
+		$verdict = self::check_free_text( $settings, $id );
+
+		if ( $verdict instanceof \WP_Error ) {
+			return $verdict;
+		}
+
 		// Une signature ne peut venir que du builder : on ne la propage jamais.
 		unset( $settings['signature'] );
 
@@ -198,12 +272,13 @@ final class Validator {
 	}
 
 	/**
-	 * Contrôle le balisage brut d'un élément « html ».
+	 * Contrôle un balisage rendu tel quel — élément « html », mais aussi tout
+	 * réglage de texte libre.
 	 *
-	 * Cet élément est le seul de Bricks à rendre son contenu tel quel, sans
-	 * conteneur ni signature — c'est ce qui permet d'y poser un SVG en ligne,
-	 * et c'est aussi ce qui en fait une porte d'entrée. Le pont étant ouvert
-	 * aux clients, on referme les usages qui n'ont rien à y faire :
+	 * Bricks rend plusieurs réglages sans conteneur ni signature — c'est ce qui
+	 * permet d'y poser un SVG en ligne, et c'est aussi ce qui en fait une porte
+	 * d'entrée. Le pont étant ouvert aux clients, on referme les usages qui n'ont
+	 * rien à y faire :
 	 *
 	 *   • script, PHP, gestionnaires `on…` et `javascript:` — exécution ;
 	 *   • iframe, object, embed, ressource distante — la règle zéro dépendance,
@@ -212,15 +287,87 @@ final class Validator {
 	 * Ce n'est pas un assainisseur général : c'est un refus net, avec un motif
 	 * lisible, pour que l'auteur corrige au lieu de découvrir une amputation
 	 * silencieuse de son balisage.
+	 *
+	 * Le contrôle portant désormais sur de la prose, chaque motif doit rester
+	 * juste sur une phrase française : un refus injustifié bloque une écriture
+	 * légitime, et le motif affiché n'aide alors personne.
 	 */
 	private static function check_raw_html( string $html, string $id ): bool|\WP_Error {
 		$forbidden = [
-			'/<\s*(script|iframe|object|embed|form|link|meta)\b/i' => 'la balise « %s » n’est pas autorisée dans un élément HTML',
+			/*
+			 * « base » complète la liste : son `href` ne charge rien, il réécrit
+			 * toutes les URL relatives de la page — et c'est le contrôle des
+			 * attributs, plus bas, qui l'attrapait jusqu'ici par accident.
+			 */
+			'/<\s*(script|iframe|object|embed|form|link|meta|base)\b/i' => 'la balise « %s » n’est pas autorisée dans un élément HTML',
 			'/<\?/'                                               => 'le code PHP n’est pas autorisé',
-			'/\son[a-z]+\s*=/i'                                   => 'les gestionnaires d’événement en attribut (on…=) ne sont pas autorisés',
-			'/javascript\s*:/i'                                   => 'les URL « javascript: » ne sont pas autorisées',
-			'/(src|href|xlink:href)\s*=\s*["\']?(https?:)?\/\//i'  => 'une ressource distante rompt la règle zéro dépendance',
+			/*
+			 * Un gestionnaire d'événement, et **seulement à l'intérieur d'une
+			 * balise**.
+			 *
+			 * L'ancrage sur `<` n'est pas un raffinement : ce contrôle s'applique
+			 * désormais à tout réglage de texte libre, et un motif non ancré
+			 * refuserait « ondes = 3 » dans une phrase.
+			 *
+			 * Mais l'ancrage seul ne suffit pas, et c'est ce qui a été mesuré :
+			 * `[^>]*` s'arrête au **premier** `>`, y compris celui contenu dans une
+			 * valeur d'attribut. `<img alt=">" onerror ="alert(1)">` passait donc
+			 * entre les deux motifs — le premier parce qu'il exige l'absence
+			 * d'espace avant le `=`, le second parce qu'il ne franchissait pas le
+			 * `>` des guillemets. Les valeurs entre guillemets sont vidées avant le
+			 * contrôle (voir `sans_valeurs()`), ce qui rend la fin de balise
+			 * lisible et ce motif suffisant à lui seul.
+			 */
+			/*
+			 * L'espace est exclue avant le deux-points : « JavaScript : les bases »
+			 * est une phrase, et un schéma d'URL ne contient pas d'espace. La
+			 * tabulation et le retour à la ligne, eux, sont retirés par l'analyseur
+			 * d'URL — donc exploitables, donc refusés.
+			 */
+			'/javascript[\t\r\n]*:/i'                             => 'les URL « javascript: » ne sont pas autorisées',
+			/*
+			 * Attributs qui **chargent** une ressource. `href` n'y figure plus :
+			 * sur un `<a>` il navigue sans rien charger — refuser un lien externe
+			 * au nom du zéro dépendance bloquait la moindre mention d'un site
+			 * partenaire — et les balises qui chargent par `href`, `link` et
+			 * `base`, sont refusées plus haut. Le `href` de `<use>` et `<image>`,
+			 * lui, charge bel et bien : il a sa propre ligne.
+			 *
+			 * Deux motifs par famille : l'URL absolue, où qu'elle soit dans la
+			 * valeur — un `srcset` mêle un fichier local et un CDN —, puis l'URL
+			 * sans protocole, qui n'a de sens qu'en tête de valeur.
+			 */
+			'/\b(src|srcset|poster|data-src|data-srcset|xlink:href|background)\s*=\s*["\']?[^"\'>]*https?:\/\//i' => 'une ressource distante rompt la règle zéro dépendance',
+			'/\b(src|srcset|poster|data-src|data-srcset|xlink:href|background)\s*=\s*["\']?\s*\/\//i'             => 'une ressource distante rompt la règle zéro dépendance',
+			'/<\s*(use|image)\b[^>]*\bhref\s*=\s*["\']?[^"\'>]*(https?:)?\/\//i'                                 => 'une ressource distante rompt la règle zéro dépendance',
+			/*
+			 * Ni `src` ni `href` : une `url()` dans un attribut `style` et un
+			 * `@import` dans une balise `<style>` chargeaient une image ou une
+			 * feuille distante sans qu'aucun attribut de ressource apparaisse.
+			 */
+			'/url\(\s*["\']?\s*(https?:)?\/\//i'                   => 'une ressource distante rompt la règle zéro dépendance',
+			'/@import\s+["\']?\s*(https?:)?\/\//i'                 => 'une ressource distante rompt la règle zéro dépendance',
 		];
+
+		/*
+		 * Le gestionnaire d'événement se cherche sur la copie neutralisée, les
+		 * autres motifs sur le texte d'origine — et cette séparation n'est pas un
+		 * détail de forme.
+		 *
+		 * Le premier a besoin de savoir **où finit une balise**, ce que le `>` d'une
+		 * valeur d'attribut fausse. Les seconds ont besoin de **lire les valeurs**,
+		 * puisqu'une ressource distante est précisément une valeur : les chercher
+		 * sur la copie vidée reviendrait à ne plus voir aucun `src="https://…"`.
+		 */
+		if ( preg_match( '/<[^>]*\son[a-z]+\s*=/i', self::sans_valeurs( $html ) ) ) {
+			return self::error(
+				sprintf(
+					'Élément « %s » : les gestionnaires d’événement en attribut (on…=) ne sont pas autorisés.',
+					$id
+				),
+				403
+			);
+		}
 
 		foreach ( $forbidden as $pattern => $reason ) {
 			if ( preg_match( $pattern, $html, $matches ) ) {
@@ -236,6 +383,30 @@ final class Validator {
 		}
 
 		return true;
+	}
+
+	/**
+	 * Vide le contenu des valeurs entre guillemets, en gardant la longueur nulle.
+	 *
+	 * Lire du balisage à l'expression régulière suppose de savoir où finit une
+	 * balise. `[^>]*` le suppose aussi — et se trompe dès qu'un `>` figure dans
+	 * une valeur d'attribut, ce qu'aucune règle n'interdit :
+	 *
+	 *     <img alt=">" onerror ="alert(1)">
+	 *
+	 * Le gestionnaire d'événement se trouve alors **après** ce que le motif prend
+	 * pour la fin de la balise, et il passe. Vider les valeurs d'abord rend la
+	 * structure lisible sans avoir à écrire un analyseur :
+	 *
+	 *     <img alt="" onerror ="">
+	 *
+	 * Ce qui compte pour **ce** contrôle — les noms d'attributs, les noms de
+	 * balises, les délimiteurs — est intégralement conservé. Ce qui disparaît, ce
+	 * sont les valeurs : cette copie ne sert donc qu'au motif qui cherche une
+	 * structure de balise, jamais à ceux qui cherchent dans une valeur.
+	 */
+	private static function sans_valeurs( string $html ): string {
+		return (string) preg_replace( '/"[^"]*"|\'[^\']*\'/', '""', $html );
 	}
 
 	/**
@@ -311,6 +482,287 @@ final class Validator {
 	}
 
 	/**
+	 * Types de propriété reconnus par le panneau de composant de Bricks.
+	 *
+	 * Le type détermine le contrôle affiché à l'éditeur du site — un champ de
+	 * texte, un sélecteur de média, une liste d'options. Un type inconnu produit
+	 * un contrôle vide : la propriété existe, mais personne ne peut la remplir.
+	 */
+	private const PROPERTY_TYPES = [
+		'text',
+		'textarea',
+		'editor',
+		'number',
+		'link',
+		'image',
+		'image-gallery',
+		'video',
+		'select',
+		'toggle',
+		'color',
+		'icon',
+		'svg',
+		'class',
+		'query',
+		'datePicker',
+	];
+
+	/**
+	 * Valide un composant Bricks.
+	 *
+	 * Un composant est un sous-arbre d'éléments plus une liste de propriétés
+	 * reliées à des réglages précis de ce sous-arbre. Trois invariants tiennent
+	 * l'ensemble, et leur rupture ne se voit pas dans le builder :
+	 *
+	 *   • l'identifiant du composant est celui de son élément racine — c'est par
+	 *     là que Bricks retrouve la racine (`get_component_element_by_id`) ;
+	 *   • le composant n'a qu'une racine, sans quoi les éléments suivants ne sont
+	 *     jamais rendus ;
+	 *   • chaque connexion de propriété désigne un élément qui existe, faute de
+	 *     quoi la propriété s'affiche à l'éditeur sans rien piloter.
+	 *
+	 * @param mixed $component Composant brut reçu de l'API.
+	 *
+	 * @return array<string, mixed>|\WP_Error
+	 */
+	public static function component( mixed $component ): array|\WP_Error {
+		if ( ! is_array( $component ) ) {
+			return self::error( 'Le composant doit être un objet.' );
+		}
+
+		$label = $component['label'] ?? '';
+
+		if ( ! is_string( $label ) || '' === trim( $label ) ) {
+			return self::error( 'Composant : « label » manquant. C’est le nom affiché dans le builder.' );
+		}
+
+		$elements = self::elements( $component['elements'] ?? [] );
+
+		if ( $elements instanceof \WP_Error ) {
+			return $elements;
+		}
+
+		if ( ! $elements ) {
+			return self::error( sprintf( 'Composant « %s » : aucun élément.', $label ) );
+		}
+
+		$roots = array_values(
+			array_filter(
+				$elements,
+				static fn ( array $element ): bool => 0 === $element['parent']
+			)
+		);
+
+		if ( count( $roots ) > 1 ) {
+			return self::error(
+				sprintf(
+					'Composant « %s » : %d éléments racine. Un composant n’en a qu’un — enveloppez le tout dans une section ou un bloc.',
+					$label,
+					count( $roots )
+				)
+			);
+		}
+
+		$id = $component['id'] ?? '';
+
+		if ( ! is_string( $id ) || ! preg_match( self::ID_PATTERN, $id ) ) {
+			$id = $roots[0]['id'];
+		}
+
+		if ( $id !== $roots[0]['id'] ) {
+			return self::error(
+				sprintf(
+					'Composant « %s » : l’identifiant du composant (« %s ») doit être celui de son élément racine (« %s »).',
+					$label,
+					$id,
+					$roots[0]['id']
+				)
+			);
+		}
+
+		$properties = self::component_properties( $component['properties'] ?? [], $elements, $label );
+
+		if ( $properties instanceof \WP_Error ) {
+			return $properties;
+		}
+
+		$entry = [
+			'id'         => $id,
+			'label'      => sanitize_text_field( $label ),
+			'category'   => is_string( $component['category'] ?? null ) && '' !== $component['category']
+				? sanitize_text_field( $component['category'] )
+				: 'components',
+			'elements'   => $elements,
+			'properties' => $properties,
+		];
+
+		if ( isset( $component['desc'] ) && is_string( $component['desc'] ) ) {
+			$entry['desc'] = sanitize_text_field( $component['desc'] );
+		}
+
+		// Métadonnées du builder : conservées si elles existent déjà, sinon posées.
+		$entry['_created']  = is_numeric( $component['_created'] ?? null ) ? (int) $component['_created'] : time();
+		$entry['_user_id']  = is_numeric( $component['_user_id'] ?? null ) ? (int) $component['_user_id'] : get_current_user_id();
+		$entry['_version']  = is_string( $component['_version'] ?? null ) && '' !== $component['_version']
+			? $component['_version']
+			: ( defined( 'BRICKS_VERSION' ) ? BRICKS_VERSION : '' );
+
+		return $entry;
+	}
+
+	/**
+	 * Valide les propriétés d'un composant et leurs connexions.
+	 *
+	 * @param mixed                            $properties Liste brute.
+	 * @param array<int, array<string, mixed>> $elements   Éléments du composant, déjà assainis.
+	 * @param string                           $label      Nom du composant, pour les messages.
+	 *
+	 * @return array<int, array<string, mixed>>|\WP_Error
+	 */
+	private static function component_properties( mixed $properties, array $elements, string $label ): array|\WP_Error {
+		if ( ! is_array( $properties ) ) {
+			return self::error( sprintf( 'Composant « %s » : « properties » doit être un tableau.', $label ) );
+		}
+
+		$known_ids = [];
+
+		foreach ( $elements as $element ) {
+			$known_ids[ $element['id'] ] = true;
+		}
+
+		$clean = [];
+		$seen  = [];
+
+		foreach ( array_values( $properties ) as $index => $property ) {
+			if ( ! is_array( $property ) ) {
+				return self::error( sprintf( 'Composant « %s », propriété #%d : objet attendu.', $label, $index ) );
+			}
+
+			$id = $property['id'] ?? '';
+
+			if ( ! is_string( $id ) || ! preg_match( self::ID_PATTERN, $id ) ) {
+				return self::error(
+					sprintf(
+						'Composant « %s », propriété #%d : « id » manquant ou invalide (3 à 32 caractères parmi A-Z, a-z, 0-9, _ et -).',
+						$label,
+						$index
+					)
+				);
+			}
+
+			if ( isset( $seen[ $id ] ) ) {
+				return self::error( sprintf( 'Composant « %s » : propriété dupliquée « %s ».', $label, $id ) );
+			}
+
+			$seen[ $id ] = true;
+
+			$type = $property['type'] ?? 'text';
+
+			if ( ! is_string( $type ) || ! in_array( $type, self::PROPERTY_TYPES, true ) ) {
+				return self::error(
+					sprintf(
+						'Composant « %s », propriété « %s » : type inconnu (« %s »). Valeurs possibles : %s.',
+						$label,
+						$id,
+						is_string( $type ) ? $type : '',
+						implode( ', ', self::PROPERTY_TYPES )
+					)
+				);
+			}
+
+			$connections = $property['connections'] ?? [];
+
+			if ( ! is_array( $connections ) ) {
+				return self::error(
+					sprintf( 'Composant « %s », propriété « %s » : « connections » doit être un objet.', $label, $id )
+				);
+			}
+
+			$clean_connections = [];
+
+			foreach ( $connections as $element_id => $setting_keys ) {
+				$element_id = (string) $element_id;
+
+				if ( ! isset( $known_ids[ $element_id ] ) ) {
+					return self::error(
+						sprintf(
+							'Composant « %s », propriété « %s » : l’élément « %s » n’existe pas dans le composant.',
+							$label,
+							$id,
+							$element_id
+						)
+					);
+				}
+
+				if ( ! is_array( $setting_keys ) || ! $setting_keys ) {
+					return self::error(
+						sprintf(
+							'Composant « %s », propriété « %s » : la connexion vers « %s » doit lister au moins un réglage.',
+							$label,
+							$id,
+							$element_id
+						)
+					);
+				}
+
+				$keys = [];
+
+				foreach ( $setting_keys as $setting_key ) {
+					if ( ! is_string( $setting_key ) || '' === $setting_key ) {
+						return self::error(
+							sprintf( 'Composant « %s », propriété « %s » : nom de réglage invalide.', $label, $id )
+						);
+					}
+
+					$keys[] = $setting_key;
+				}
+
+				$clean_connections[ $element_id ] = array_values( array_unique( $keys ) );
+			}
+
+			if ( ! $clean_connections ) {
+				return self::error(
+					sprintf(
+						'Composant « %s », propriété « %s » : aucune connexion. Une propriété qui ne pilote aucun réglage '
+						. 'apparaît à l’éditeur du site sans rien changer.',
+						$label,
+						$id
+					)
+				);
+			}
+
+			$entry = [
+				'id'          => $id,
+				'label'       => is_string( $property['label'] ?? null ) && '' !== $property['label']
+					? sanitize_text_field( $property['label'] )
+					: $id,
+				'type'        => $type,
+				'connections' => $clean_connections,
+			];
+
+			foreach ( [ 'default', 'options' ] as $optional ) {
+				if ( isset( $property[ $optional ] ) ) {
+					$entry[ $optional ] = $property[ $optional ];
+				}
+			}
+
+			foreach ( [ 'group', 'desc' ] as $optional ) {
+				if ( isset( $property[ $optional ] ) && is_string( $property[ $optional ] ) ) {
+					$entry[ $optional ] = sanitize_text_field( $property[ $optional ] );
+				}
+			}
+
+			if ( ! empty( $property['replace'] ) ) {
+				$entry['replace'] = true;
+			}
+
+			$clean[] = $entry;
+		}
+
+		return $clean;
+	}
+
+	/**
 	 * Valide une liste de classes globales Bricks.
 	 *
 	 * @param mixed $classes    Liste brute.
@@ -376,10 +828,59 @@ final class Validator {
 				$entry['selectors'] = $class['selectors'];
 			}
 
+			/*
+			 * « %root% » n'est résolu que par le builder. Écrit par l'API, il reste
+			 * littéral dans la feuille : le navigateur écarte la règle, et avec elle
+			 * ce qui suit jusqu'à l'accolade suivante. La route du CSS global le
+			 * refusait déjà ; le CSS personnalisé d'une classe et celui de ses
+			 * sous-sélecteurs, qui sortent dans la même feuille, le laissaient
+			 * passer.
+			 */
+			$verdict = self::check_root_token( [ $entry['settings'], $entry['selectors'] ?? [] ], $name );
+
+			if ( $verdict instanceof \WP_Error ) {
+				return $verdict;
+			}
+
 			$clean[] = $entry;
 		}
 
 		return $clean;
+	}
+
+	/**
+	 * Refuse le jeton « %root% » partout dans les réglages d'une classe.
+	 *
+	 * La recherche est récursive : le CSS personnalisé se range sous `_cssCustom`,
+	 * mais aussi sous une clé de point de rupture, et chaque sous-sélecteur porte
+	 * ses propres réglages.
+	 *
+	 * @param mixed  $value Réglages, sous-sélecteurs, ou n'importe quelle valeur.
+	 * @param string $name  Nom de la classe, pour le message.
+	 */
+	private static function check_root_token( mixed $value, string $name ): bool|\WP_Error {
+		if ( is_array( $value ) ) {
+			foreach ( $value as $item ) {
+				$verdict = self::check_root_token( $item, $name );
+
+				if ( $verdict instanceof \WP_Error ) {
+					return $verdict;
+				}
+			}
+
+			return true;
+		}
+
+		if ( is_string( $value ) && str_contains( $value, '%root%' ) ) {
+			return self::error(
+				sprintf(
+					'Classe « %1$s » : « %%root%% » n’est résolu que par le builder — écrivez le sélecteur réel (« .%1$s »).',
+					$name
+				)
+			);
+		}
+
+		return true;
 	}
 
 	/**

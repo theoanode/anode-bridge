@@ -109,6 +109,65 @@ final class Bricks_Adapter {
 		}
 
 		self::regenerate_css( $post_id );
+		self::announce_change( $post_id );
+	}
+
+	/**
+	 * Annonce qu'une page a changé, pour que les caches s'invalident.
+	 *
+	 * **`update_post_meta` ne déclenche pas `save_post`.** Une mise en page écrite
+	 * par l'API modifiait donc le site sans que rien ne l'apprenne : le cache de
+	 * page continuait de servir l'ancienne version, et la correction n'apparaissait
+	 * pas. Le symptôme est le pire possible — on croit que l'écriture a échoué, on
+	 * la refait, et le résultat ne change toujours pas.
+	 *
+	 * Ce n'est pas un défaut du cache : c'est l'écriture qui était muette. Aucun
+	 * cache, maison ou serveur, ne pouvait faire mieux.
+	 *
+	 * Les trois gestes, du plus général au plus particulier :
+	 *
+	 * 1. `clean_post_cache()` — le cache d'objets et les transitoires du noyau ;
+	 * 2. `anode/bricks/page_updated` — le point d'accroche du projet, pour un
+	 *    composant qui voudrait s'y brancher ;
+	 * 3. la purge du cache de l'hébergeur, **ciblée sur la page**.
+	 *
+	 * Ce dernier point n'est pas un détail. Purger le cache entier du serveur à
+	 * chaque écriture de page — ce que faisait la première version — vide le
+	 * travail de tout le site pour un titre corrigé : sur une écriture par lot,
+	 * une trentaine de pages, le cache ne se reconstitue jamais. On ne retombe
+	 * donc sur la purge totale que si le cache en place n'offre rien de plus fin.
+	 *
+	 * On ne déclenche **pas** `save_post` artificiellement : tout ce qui y est
+	 * accroché partirait — révisions, notifications, réindexations — pour une
+	 * écriture qui ne touche qu'une méta.
+	 */
+	private static function announce_change( int $post_id ): void {
+		clean_post_cache( $post_id );
+
+		/**
+		 * Une page Bricks vient d'être réécrite par l'API.
+		 *
+		 * @param int $post_id
+		 */
+		do_action( 'anode/bricks/page_updated', $post_id );
+
+		// LiteSpeed — cache serveur d'Hostinger : purge de la seule page.
+		if ( has_action( 'litespeed_purge_post' ) ) {
+			do_action( 'litespeed_purge_post', $post_id );
+
+			return;
+		}
+
+		// nginx FastCGI via nginx-helper : il ne sait purger qu'une URL, ou tout.
+		if ( has_action( 'rt_nginx_helper_purge_url' ) ) {
+			do_action( 'rt_nginx_helper_purge_url', get_permalink( $post_id ), true );
+
+			return;
+		}
+
+		if ( has_action( 'rt_nginx_helper_purge_all' ) ) {
+			do_action( 'rt_nginx_helper_purge_all' );
+		}
 	}
 
 	/**
@@ -150,17 +209,79 @@ final class Bricks_Adapter {
 	}
 
 	/**
+	 * Remet une option en chargement automatique si elle en a été sortie.
+	 *
+	 * Une version antérieure du pont passait `false` en troisième argument
+	 * d'`update_option`, ce qui écrit `off` — une valeur **explicite**, que le
+	 * noyau ne réévalue plus jamais. Bricks lisant ces options à chaque requête du
+	 * site, chacune coûtait dès lors une requête SQL par page vue.
+	 *
+	 * L'écriture est directe : `update_option` ne sait pas changer l'autoload sans
+	 * changer la valeur, et la relire pour la réécrire ferait un aller-retour
+	 * inutile sur une option volumineuse.
+	 *
+	 * Faite à chaque écriture, mais sans coût : la clause `autoload IN` ne touche
+	 * aucune ligne sur un site déjà correct.
+	 */
+	private static function reparer_autoload(): void {
+		global $wpdb;
+
+		/*
+		 * Toutes les options que Bricks charge dans `Database::load_data()`, donc à
+		 * chaque requête du site. Chacune sortie du chargement automatique coûte une
+		 * requête SQL par page vue — sept options, sept requêtes, sans que rien ne
+		 * le signale.
+		 */
+		$options = [
+			self::OPT_GLOBAL_CLASSES,
+			self::OPT_GLOBAL_CLASSES_CATEGORIES,
+			self::OPT_GLOBAL_VARIABLES,
+			self::OPT_GLOBAL_VARIABLES_CATEGORIES,
+			self::OPT_GLOBAL_SETTINGS,
+			self::OPT_BREAKPOINTS,
+			self::OPT_COMPONENTS,
+			self::OPT_COLOR_PALETTE,
+			self::OPT_THEME_STYLES,
+		];
+
+		$trous = implode( ', ', array_fill( 0, count( $options ), '%s' ) );
+
+		// Une seule requête, idempotente : la clause `autoload IN` fait qu'un site
+		// déjà correct n'écrit rien.
+		$wpdb->query(
+			$wpdb->prepare(
+				"UPDATE `{$wpdb->options}` SET autoload = 'on' WHERE option_name IN ( {$trous} ) AND autoload IN ( 'off', 'no' )", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				...$options
+			)
+		);
+	}
+
+	/**
 	 * Remplace intégralement les classes globales.
+	 *
+	 * Le troisième argument d'`update_option` vaut `null` — « ne change pas
+	 * l'autoload » — et non `false`. Bricks charge ses classes globales à chaque
+	 * requête du site pour émettre leur CSS : les sortir du chargement automatique
+	 * ajoutait une requête SQL à chaque page vue, sans que rien ne le signale.
+	 * Une écriture n'a pas à décider de la façon dont l'option est ensuite lue.
+	 *
+	 * Mais `null` **ne répare pas** un site déjà passé par la version fautive :
+	 * le noyau ne réévalue l'autoload que si la valeur enregistrée vaut `auto`,
+	 * `auto-on` ou `auto-off`, or `update_option( …, false )` avait écrit `off`,
+	 * une valeur explicite. D'où la remise en chargement automatique ci-dessous,
+	 * faite une fois, à la première écriture qui suit la mise à jour.
 	 *
 	 * @param array<int, array<string, mixed>> $classes Classes validées.
 	 */
 	public static function set_global_classes( array $classes ): void {
-		update_option( self::OPT_GLOBAL_CLASSES, array_values( $classes ), false );
+		self::reparer_autoload();
+
+		update_option( self::OPT_GLOBAL_CLASSES, array_values( $classes ), null );
 
 		// Bricks compare ces deux valeurs pour détecter les conflits d'édition
 		// simultanée dans le builder : on les met à jour comme le ferait le builder.
-		update_option( self::OPT_GLOBAL_CLASSES_TIMESTAMP, time(), false );
-		update_option( self::OPT_GLOBAL_CLASSES_USER, get_current_user_id(), false );
+		update_option( self::OPT_GLOBAL_CLASSES_TIMESTAMP, time(), null );
+		update_option( self::OPT_GLOBAL_CLASSES_USER, get_current_user_id(), null );
 
 		self::regenerate_css();
 	}
@@ -178,7 +299,7 @@ final class Bricks_Adapter {
 	 * @param array<int, array<string, mixed>> $categories Catégories validées.
 	 */
 	public static function set_class_categories( array $categories ): void {
-		update_option( self::OPT_GLOBAL_CLASSES_CATEGORIES, array_values( $categories ), false );
+		update_option( self::OPT_GLOBAL_CLASSES_CATEGORIES, array_values( $categories ), null );
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -198,7 +319,11 @@ final class Bricks_Adapter {
 	 * @param array<int, array<string, mixed>> $variables Variables validées.
 	 */
 	public static function set_variables( array $variables ): void {
-		update_option( self::OPT_GLOBAL_VARIABLES, array_values( $variables ), false );
+		// `null` : l'autoload reste tel quel — Bricks lit ses variables à chaque
+		// requête pour émettre les `var(--…)` du site.
+		self::reparer_autoload();
+
+		update_option( self::OPT_GLOBAL_VARIABLES, array_values( $variables ), null );
 		self::regenerate_css();
 	}
 
@@ -215,7 +340,49 @@ final class Bricks_Adapter {
 	 * @param array<int, array<string, mixed>> $categories Catégories validées.
 	 */
 	public static function set_variable_categories( array $categories ): void {
-		update_option( self::OPT_GLOBAL_VARIABLES_CATEGORIES, array_values( $categories ), false );
+		update_option( self::OPT_GLOBAL_VARIABLES_CATEGORIES, array_values( $categories ), null );
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* Composants                                                          */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Composants Bricks (Bricks 1.12+).
+	 *
+	 * Un composant est un sous-arbre d'éléments défini une seule fois, plus une
+	 * liste de propriétés qui en rendent certains réglages variables. Chaque page
+	 * n'en garde qu'une instance — un élément portant `cid` — si bien qu'une
+	 * modification de structure se répercute partout d'un coup.
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public static function get_components(): array {
+		$components = get_option( self::OPT_COMPONENTS, [] );
+
+		return is_array( $components ) ? array_values( $components ) : [];
+	}
+
+	/**
+	 * Remplace intégralement les composants.
+	 *
+	 * @param array<int, array<string, mixed>> $components Composants validés.
+	 */
+	public static function set_components( array $components ): void {
+		// `null` : l'autoload reste tel quel — un composant est rendu à chaque
+		// requête sur les pages qui en portent une instance.
+		update_option( self::OPT_COMPONENTS, array_values( $components ), null );
+
+		/*
+		 * Bricks garde les composants dans son cache de données globales, chargé
+		 * une fois par requête. Sans cette remise à jour, une écriture suivie
+		 * d'un rendu dans la même requête rendrait l'état précédent.
+		 */
+		if ( class_exists( '\Bricks\Database' ) && is_array( \Bricks\Database::$global_data ) ) {
+			\Bricks\Database::$global_data['components'] = array_values( $components );
+		}
+
+		self::regenerate_css();
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -235,7 +402,7 @@ final class Bricks_Adapter {
 	 * @param array<int, array<string, mixed>> $palette Palettes validées.
 	 */
 	public static function set_color_palette( array $palette ): void {
-		update_option( self::OPT_COLOR_PALETTE, array_values( $palette ), false );
+		update_option( self::OPT_COLOR_PALETTE, array_values( $palette ), null );
 	}
 
 	/**

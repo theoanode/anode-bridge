@@ -153,15 +153,25 @@ final class Rest_Site {
 			$flushed[] = 'bricks-css';
 		}
 
-		// WP Rocket : présent sur tous les sites issus du blueprint.
-		if ( function_exists( 'rocket_clean_domain' ) ) {
-			rocket_clean_domain();
-			$flushed[] = 'wp-rocket';
+		/*
+		 * Le cache de **pages** — celui qui fait qu'une correction n'apparaît pas.
+		 *
+		 * Il manquait. L'outil vidait le cache d'objets, régénérait le CSS de
+		 * Bricks, et appelait WP Rocket — retiré du blueprint, donc du code mort. Or
+		 * `wp_flush_cache` est documenté comme « à appeler si le rendu en ligne
+		 * semble figé » : c'était précisément le seul cache qu'il ne touchait pas.
+		 *
+		 * Le cache de page relève de l'hébergeur, servi devant PHP : on appelle sa
+		 * purge, et seulement si elle existe.
+		 */
+		if ( has_action( 'litespeed_purge_all' ) ) {
+			do_action( 'litespeed_purge_all' );
+			$flushed[] = 'litespeed';
 		}
 
-		if ( function_exists( 'rocket_clean_minify' ) ) {
-			rocket_clean_minify();
-			$flushed[] = 'wp-rocket-minify';
+		if ( has_action( 'rt_nginx_helper_purge_all' ) ) {
+			do_action( 'rt_nginx_helper_purge_all' );
+			$flushed[] = 'nginx-helper';
 		}
 
 		Security::log( 'cache.flush', [ 'flushed' => $flushed ] );

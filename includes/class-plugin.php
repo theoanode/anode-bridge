@@ -26,6 +26,7 @@ final class Plugin {
 		Rest_Design_System::class,
 		Rest_Media::class,
 		Rest_Content::class,
+		Rest_Health::class,
 	];
 
 	public function register(): void {
@@ -47,6 +48,17 @@ final class Plugin {
 	 * repérer rapidement les pages construites avec Bricks sans requête
 	 * supplémentaire. L'écriture passe exclusivement par anode/v1/bricks/*,
 	 * qui valide et régénère le CSS.
+	 *
+	 * « Lecture seule » n'était qu'une intention : `register_post_meta` pose
+	 * l'`auth_callback` comme filtre `auth_post_meta_<clé>_for_<type>`, et
+	 * `map_meta_cap` s'en sert pour accorder `edit_post_meta` — y compris sur une
+	 * méta protégée. Un callback qui répond « oui » rendait donc la méta
+	 * inscriptible par /wp/v2/pages, hors de toute validation : basculer
+	 * `_bricks_editor_mode` sur « wordpress » suffit à faire disparaître la mise
+	 * en page du site, alors que la page n'a pas changé d'un octet.
+	 *
+	 * Le refus ne coûte rien en lecture : `WP_REST_Meta_Fields::get_value()` ne
+	 * consulte pas l'`auth_callback` — seule l'écriture passe par lui.
 	 */
 	public function expose_bricks_meta(): void {
 		if ( ! Bricks_Adapter::is_available() ) {
@@ -61,7 +73,7 @@ final class Plugin {
 					'type'          => 'string',
 					'single'        => true,
 					'show_in_rest'  => true,
-					'auth_callback' => static fn (): bool => Security::can_read(),
+					'auth_callback' => static fn (): bool => false,
 				]
 			);
 		}

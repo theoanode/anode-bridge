@@ -3,7 +3,7 @@
  * Plugin Name:       Anode Bridge
  * Plugin URI:        https://github.com/theoanode/anode-wp
  * Description:       Pont REST sécurisé entre WordPress/Bricks et le serveur MCP Anode. Expose les données Bricks (contenu, classes globales, variables, templates) et le design system via l'API REST, sans accès SSH.
- * Version:           1.0.0
+ * Version:           1.4.0
  * Requires at least: 6.4
  * Requires PHP:      8.1
  * Author:            Anode
@@ -22,7 +22,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-const VERSION    = '1.0.0';
+const VERSION    = '1.4.0';
 const NAMESPACE_ = 'anode/v1';
 
 define( 'ANODE_BRIDGE_FILE', __FILE__ );

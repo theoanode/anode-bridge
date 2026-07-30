@@ -3,7 +3,7 @@
  * Plugin Name:       Anode Bridge
  * Plugin URI:        https://github.com/theoanode/anode-wp
  * Description:       Pont REST sécurisé entre WordPress/Bricks et le serveur MCP Anode. Expose les données Bricks (contenu, classes globales, variables, templates) et le design system via l'API REST, sans accès SSH.
- * Version:           1.4.0
+ * Version:           2.0.0
  * Requires at least: 6.4
  * Requires PHP:      8.1
  * Author:            Anode
@@ -22,8 +22,24 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-const VERSION    = '1.4.0';
+/*
+ * La version est lue dans l'en-tête du fichier, pas recopiée en dessous.
+ *
+ * Le doublon dérive : mesuré deux fois sur les extensions de ce dépôt — en-tête
+ * 1.2.0 contre constante 1.1.0 — et c'est toujours la constante que le code
+ * rapporte. Or celle-ci sert à décider qu'une mise à jour a eu lieu : figée,
+ * elle laisse le pont croire qu'il n'a pas changé, et ses routes ne sont jamais
+ * réenregistrées après une montée de version.
+ *
+ * `get_file_data()` lit les seize premiers kilo-octets, sans charger le fichier
+ * deux fois, et c'est la fonction que WordPress emploie lui-même pour ça.
+ */
 const NAMESPACE_ = 'anode/v1';
+
+define(
+	'ANODE_BRIDGE_VERSION',
+	get_file_data( __FILE__, [ 'version' => 'Version' ] )['version'] ?: '0.0.0'
+);
 
 define( 'ANODE_BRIDGE_FILE', __FILE__ );
 define( 'ANODE_BRIDGE_DIR', plugin_dir_path( __FILE__ ) );
@@ -75,12 +91,12 @@ bootstrap();
 add_action(
 	'init',
 	static function (): void {
-		if ( get_option( 'anode_bridge_version' ) === VERSION ) {
+		if ( get_option( 'anode_bridge_version' ) === ANODE_BRIDGE_VERSION ) {
 			return;
 		}
 
 		Security::grant_capability_to_admins();
-		update_option( 'anode_bridge_version', VERSION, false );
+		update_option( 'anode_bridge_version', ANODE_BRIDGE_VERSION, false );
 	},
 	5
 );
@@ -92,7 +108,7 @@ if ( function_exists( 'register_activation_hook' ) ) {
 		__FILE__,
 		static function (): void {
 			Security::grant_capability_to_admins();
-			update_option( 'anode_bridge_version', VERSION, false );
+			update_option( 'anode_bridge_version', ANODE_BRIDGE_VERSION, false );
 		}
 	);
 }

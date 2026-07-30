@@ -84,7 +84,7 @@ final class Rest_Site {
 			'versions'    => [
 				'wordpress' => get_bloginfo( 'version' ),
 				'php'       => PHP_VERSION,
-				'bridge'    => VERSION,
+				'bridge'    => ANODE_BRIDGE_VERSION,
 			],
 			'theme'       => [
 				'name'    => $theme->get( 'Name' ),

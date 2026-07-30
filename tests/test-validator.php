@@ -367,6 +367,140 @@ test(
 );
 
 test(
+	'un gestionnaire d’événement posé en attribut personnalisé est refusé',
+	function (): void {
+		/*
+		 * `_attributes` est disponible sur tout élément Bricks, et Bricks le rend
+		 * tel quel dans la balise. Le contrôle du texte libre ne le voyait pas :
+		 * il ne suit que les valeurs contenant un « < », et `alert(1)` n'en a
+		 * aucun. Reproduit sur un site en ligne — le pont acceptait l'écriture,
+		 * et la page servait `<div … onclick="alert(1)">`.
+		 */
+		foreach ( [ 'onclick', 'onerror', 'onfocus', 'ONMOUSEOVER', ' onload ' ] as $nom ) {
+			$element = [
+				[
+					'id'       => 'aaa111',
+					'name'     => 'block',
+					'parent'   => 0,
+					'children' => [],
+					'settings' => [ '_attributes' => [ [ 'name' => $nom, 'value' => 'alert(1)' ] ] ],
+				],
+			];
+
+			assert_error(
+				Validator::elements( $element ),
+				'gestionnaire',
+				"« {$nom} » aurait dû être refusé"
+			);
+		}
+	}
+);
+
+test(
+	'un attribut qui porte une URL interprétée est refusé',
+	function (): void {
+		foreach ( [ 'style', 'srcdoc', 'formaction', 'data' ] as $nom ) {
+			$element = [
+				[
+					'id'       => 'aaa111',
+					'name'     => 'block',
+					'parent'   => 0,
+					'children' => [],
+					'settings' => [ '_attributes' => [ [ 'name' => $nom, 'value' => 'x' ] ] ],
+				],
+			];
+
+			assert_error( Validator::elements( $element ), 'autorisé', "« {$nom} » aurait dû être refusé" );
+		}
+	}
+);
+
+test(
+	'la valeur d’un attribut est éprouvée comme du HTML libre',
+	function (): void {
+		// Un `href` légitime, mais dont la valeur camoufle un javascript:.
+		$element = [
+			[
+				'id'       => 'aaa111',
+				'name'     => 'block',
+				'parent'   => 0,
+				'children' => [],
+				'settings' => [ '_attributes' => [ [ 'name' => 'href', 'value' => 'java&#115;cript:alert(1)' ] ] ],
+			],
+		];
+
+		assert_error( Validator::elements( $element ), 'javascript', 'valeur camouflée refusée' );
+	}
+);
+
+test(
+	'un attribut personnalisé légitime passe',
+	function (): void {
+		// Le contrôle ne doit pas fermer l'usage normal : `tabindex`, `role`,
+		// `data-*` et `aria-*` sont exactement ce pour quoi le réglage existe.
+		$element = [
+			[
+				'id'       => 'aaa111',
+				'name'     => 'block',
+				'parent'   => 0,
+				'children' => [],
+				'settings' => [
+					'_attributes' => [
+						[ 'name' => 'tabindex', 'value' => '-1' ],
+						[ 'name' => 'role', 'value' => 'region' ],
+						[ 'name' => 'data-form', 'value' => 'contact' ],
+						[ 'name' => 'aria-label', 'value' => 'Nos offres' ],
+						[ 'name' => 'animate', 'value' => 'fade-up' ],
+					],
+				],
+			],
+		];
+
+		assert_true( is_array( Validator::elements( $element ) ), 'attributs légitimes acceptés' );
+	}
+);
+
+test(
+	'une URL « javascript: » camouflée est refusée',
+	function (): void {
+		/*
+		 * Un navigateur décode les entités d'un attribut avant de suivre l'URL,
+		 * et son analyseur retire tabulations et retours à la ligne **à
+		 * l'intérieur** du schéma. Les trois formes ci-dessous s'exécutent donc
+		 * chez le visiteur, et traversaient le contrôle.
+		 */
+		foreach (
+			[
+				'<a href="javascript:alert(1)">x</a>',
+				'<a href="java&#115;cript:alert(1)">x</a>',
+				'<a href="&#106;avascript:alert(1)">x</a>',
+				"<a href=\"java\tscript:alert(1)\">x</a>",
+				"<a href=\"ja\nvascript:alert(1)\">x</a>",
+				'<a href="JAVASCRIPT:alert(1)">x</a>',
+			] as $markup
+		) {
+			assert_error(
+				Validator::elements( html_element( $markup ) ),
+				'javascript',
+				"« {$markup} » aurait dû être refusé"
+			);
+		}
+	}
+);
+
+test(
+	'une phrase contenant « JavaScript : » n’est pas prise pour une URL',
+	function (): void {
+		// L'espace ordinaire est exclue du motif, et il le faut : un schéma
+		// d'URL n'en contient pas, une phrase oui.
+		assert_true(
+			is_array( Validator::elements( html_element( '<p>JavaScript : les bases</p>' ) ) ),
+			'phrase acceptée'
+		);
+	}
+);
+
+test(
 	'un gestionnaire d’événement en attribut est refusé',
 	function (): void {
 		/*
@@ -388,6 +522,16 @@ test(
 			"<img src=\"/a.jpg\" onerror\n=\"alert(1)\">",
 			'<img src="/a.jpg" ONERROR="alert(1)">',
 			'<div data-x=">"><span onclick="x()">a</span></div>',
+
+			/*
+			 * La barre oblique sépare deux attributs, exactement comme l'espace.
+			 * `<a href="x"/onclick="…">` est du HTML valide que tous les
+			 * navigateurs exécutent — et le motif ne cherchait qu'un caractère
+			 * d'espacement. Ces trois formes traversaient le filtre.
+			 */
+			'<a href="x"/onclick="alert(1)">a</a>',
+			'<img src=x/onerror=alert(1)>',
+			'<svg/onload="alert(1)"></svg>',
 		];
 
 		foreach ( $cas as $markup ) {

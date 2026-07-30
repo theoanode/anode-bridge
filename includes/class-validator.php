@@ -215,6 +215,82 @@ final class Validator {
 	}
 
 	/**
+	 * Contrôle les attributs personnalisés d'un élément.
+	 *
+	 * Deux familles sont refusées, et pour des raisons distinctes :
+	 *
+	 * - **`on…`** : ce sont des gestionnaires d'événement. Leur valeur est du
+	 *   JavaScript, exécuté chez chaque visiteur. Aucun usage légitime ne passe
+	 *   par le pont — un comportement s'écrit dans `assets/js/`, versionné.
+	 * - **`style`, `srcdoc`, `formaction`, `xlink:href`, `data`** : ils portent
+	 *   une URL ou du contenu que le navigateur interprète, donc une porte vers
+	 *   `javascript:` ou une ressource distante.
+	 *
+	 * La valeur est éprouvée par les mêmes motifs que le HTML libre, ce qui
+	 * couvre `javascript:` sous toutes ses formes camouflées.
+	 *
+	 * @param mixed  $attributes Valeur brute du réglage `_attributes`.
+	 * @param string $id         Identifiant de l'élément, pour le message.
+	 */
+	private static function check_attributes( mixed $attributes, string $id ): bool|\WP_Error {
+		if ( ! is_array( $attributes ) ) {
+			return true;
+		}
+
+		$interdits = [ 'style', 'srcdoc', 'formaction', 'xlink:href', 'data', 'ping' ];
+
+		foreach ( $attributes as $attribut ) {
+			if ( ! is_array( $attribut ) ) {
+				continue;
+			}
+
+			$nom = strtolower( trim( (string) ( $attribut['name'] ?? '' ) ) );
+
+			if ( '' === $nom ) {
+				continue;
+			}
+
+			if ( str_starts_with( $nom, 'on' ) ) {
+				return self::error(
+					sprintf(
+						'Élément « %s » : l’attribut « %s » est un gestionnaire d’événement. Un comportement s’écrit dans assets/js/, pas dans un attribut.',
+						$id,
+						$nom
+					),
+					403
+				);
+			}
+
+			if ( in_array( $nom, $interdits, true ) ) {
+				return self::error(
+					sprintf(
+						'Élément « %s » : l’attribut « %s » n’est pas autorisé — il porte une URL ou du contenu interprété par le navigateur.',
+						$id,
+						$nom
+					),
+					403
+				);
+			}
+
+			$valeur = (string) ( $attribut['value'] ?? '' );
+
+			if ( '' === $valeur ) {
+				continue;
+			}
+
+			// Même jeu de motifs que le HTML libre : `javascript:` camouflé,
+			// ressource distante, balise injectée dans une valeur d'attribut.
+			$verdict = self::check_raw_html( $valeur, $id );
+
+			if ( $verdict instanceof \WP_Error ) {
+				return $verdict;
+			}
+		}
+
+		return true;
+	}
+
+	/**
 	 * Assainit les réglages d'un élément.
 	 *
 	 * Point de sécurité : l'élément « code » de Bricks peut exécuter du PHP.
@@ -256,6 +332,26 @@ final class Validator {
 		 * n'y a rien à refuser.
 		 */
 		$verdict = self::check_free_text( $settings, $id );
+
+		if ( $verdict instanceof \WP_Error ) {
+			return $verdict;
+		}
+
+		/*
+		 * Les attributs personnalisés sont contrôlés à part, et il le faut.
+		 *
+		 * `_attributes` est disponible sur **tout** élément Bricks — bloc,
+		 * section, bouton, image — et Bricks les rend tels quels dans la balise.
+		 * Le contrôle ci-dessus ne les voyait pas : il ne suit que les valeurs
+		 * contenant un « < », et `onclick` = `alert(1)` n'en a aucun.
+		 *
+		 * Reproduit sur un site en ligne : un appel au pont posant
+		 * `_attributes: [{ name: "onclick", value: "alert(1)" }]` était accepté,
+		 * écrit en base, et rendu en `<div … onclick="alert(1)">`. Toutes les
+		 * gardes contre `<script>`, `on…=` et `javascript:` étaient contournées
+		 * par ce seul chemin.
+		 */
+		$verdict = self::check_attributes( $settings['_attributes'] ?? null, $id );
 
 		if ( $verdict instanceof \WP_Error ) {
 			return $verdict;
@@ -319,12 +415,15 @@ final class Validator {
 			 * lisible et ce motif suffisant à lui seul.
 			 */
 			/*
-			 * L'espace est exclue avant le deux-points : « JavaScript : les bases »
-			 * est une phrase, et un schéma d'URL ne contient pas d'espace. La
-			 * tabulation et le retour à la ligne, eux, sont retirés par l'analyseur
-			 * d'URL — donc exploitables, donc refusés.
+			 * Le séparateur toléré est admis **entre chaque lettre**, pas
+			 * seulement avant le deux-points : `java\tscript:` s'exécute, et le
+			 * motif d'avant ne le voyait pas. Ce sont exactement les caractères
+			 * que l'analyseur d'URL retire — tabulation, retours, octet nul.
+			 *
+			 * L'espace ordinaire en est exclue, et il le faut : « JavaScript :
+			 * les bases » est une phrase, et un schéma d'URL n'en contient pas.
 			 */
-			'/javascript[\t\r\n]*:/i'                             => 'les URL « javascript: » ne sont pas autorisées',
+			'/j[\t\r\n\x00]*a[\t\r\n\x00]*v[\t\r\n\x00]*a[\t\r\n\x00]*s[\t\r\n\x00]*c[\t\r\n\x00]*r[\t\r\n\x00]*i[\t\r\n\x00]*p[\t\r\n\x00]*t[\t\r\n\x00]*:/i' => 'les URL « javascript: » ne sont pas autorisées',
 			/*
 			 * Attributs qui **chargent** une ressource. `href` n'y figure plus :
 			 * sur un `<a>` il navigue sans rien charger — refuser un lien externe
@@ -359,7 +458,17 @@ final class Validator {
 		 * puisqu'une ressource distante est précisément une valeur : les chercher
 		 * sur la copie vidée reviendrait à ne plus voir aucun `src="https://…"`.
 		 */
-		if ( preg_match( '/<[^>]*\son[a-z]+\s*=/i', self::sans_valeurs( $html ) ) ) {
+		/*
+		 * Le séparateur d'attributs inclut « / », pas seulement l'espace.
+		 *
+		 * `<a href="x"/onclick="alert(1)">` est du HTML valide : la barre oblique
+		 * sépare deux attributs, et tous les navigateurs l'exécutent. Le motif
+		 * n'exigeait qu'un caractère d'espacement — ce balisage traversait donc
+		 * le filtre, partait en base, et s'exécutait chez chaque visiteur.
+		 * Reproduit sur les quatre variantes : espace, tabulation, saut de ligne
+		 * et barre oblique, avec et sans guillemets.
+		 */
+		if ( preg_match( '/<[^>]*[\s\/]on[a-z]+\s*=/i', self::sans_valeurs( $html ) ) ) {
 			return self::error(
 				sprintf(
 					'Élément « %s » : les gestionnaires d’événement en attribut (on…=) ne sont pas autorisés.',
@@ -369,8 +478,23 @@ final class Validator {
 			);
 		}
 
+		/*
+		 * Les motifs cherchent sur une forme **décodée**.
+		 *
+		 * Un navigateur décode les entités HTML d'un attribut avant de suivre
+		 * l'URL : `java&#115;cript:alert(1)` devient `javascript:alert(1)` et
+		 * s'exécute. Le motif, lui, ne voyait que la forme encodée et laissait
+		 * passer — reproduit sur trois variantes.
+		 *
+		 * La recherche porte sur les deux formes : la décodée attrape ce genre
+		 * de camouflage, la brute reste nécessaire pour tout ce que le décodage
+		 * transformerait — un `&lt;script&gt;` écrit volontairement dans du
+		 * texte ne doit pas devenir une balise aux yeux du contrôle.
+		 */
+		$decode = html_entity_decode( $html, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+
 		foreach ( $forbidden as $pattern => $reason ) {
-			if ( preg_match( $pattern, $html, $matches ) ) {
+			if ( preg_match( $pattern, $html, $matches ) || preg_match( $pattern, $decode, $matches ) ) {
 				return self::error(
 					sprintf(
 						'Élément « %s » : %s.',

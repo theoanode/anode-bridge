@@ -96,6 +96,31 @@ final class Rest_Media {
 			return new \WP_Error( 'anode_bridge_invalid', 'URL invalide ou non autorisée.', [ 'status' => 400 ] );
 		}
 
+		/*
+		 * Le nom d'hôte ne peut pas être une adresse IP.
+		 *
+		 * `wp_http_validate_url()` écarte les plages privées mais **pas**
+		 * `169.254.169.254` — l'adresse des métadonnées d'instance chez AWS,
+		 * GCP et Azure, qui répond en clair avec les jetons du serveur. Un
+		 * compte disposant de `upload_files` en ferait une sonde du réseau
+		 * interne, et rapatrierait la réponse dans la médiathèque.
+		 *
+		 * Exiger un nom d'hôte ne ferme pas tout — un nom peut résoudre vers une
+		 * adresse interne — mais retire le cas trivial, celui qui s'exploite
+		 * sans rien préparer. Même garde que celle des relais de formulaire.
+		 */
+		$hote = (string) wp_parse_url( $url, PHP_URL_HOST );
+
+		// `wp_parse_url` rend une IPv6 entre crochets, que `FILTER_VALIDATE_IP`
+		// ne reconnaît pas sous cette forme.
+		if ( '' === $hote || false !== filter_var( trim( $hote, '[]' ), FILTER_VALIDATE_IP ) ) {
+			return new \WP_Error(
+				'anode_bridge_invalid',
+				'Un nom d’hôte est exigé : une adresse IP littérale n’est pas acceptée.',
+				[ 'status' => 400 ]
+			);
+		}
+
 		require_once ABSPATH . 'wp-admin/includes/file.php';
 		require_once ABSPATH . 'wp-admin/includes/media.php';
 		require_once ABSPATH . 'wp-admin/includes/image.php';

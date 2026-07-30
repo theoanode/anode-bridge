@@ -125,7 +125,7 @@ final class Rest_Health {
 			'name'    => 'anode-bridge',
 			'present' => true,
 			'loaded'  => true,
-			'version' => VERSION,
+			'version' => ANODE_BRIDGE_VERSION,
 			'checks'  => $this->sondes( 'anode-bridge' ),
 		];
 
@@ -281,16 +281,81 @@ final class Rest_Health {
 				'route /form/<nom> enregistrée'
 			),
 			$this->sonde_fichiers_proteges(),
-			$this->sonde(
-				'forms-stockage',
-				post_type_exists( \Anode\Forms\POST_TYPE ),
-				sprintf(
-					'le type « %s », qui archive les envois, n’existe pas : une demande reçue serait perdue.',
-					\Anode\Forms\POST_TYPE
-				),
-				sprintf( 'les envois sont archivés dans « %s »', \Anode\Forms\POST_TYPE )
-			),
+			$this->sonde_relais_declares(),
 		];
+	}
+
+	/**
+	 * Chaque formulaire a-t-il un relais où envoyer ?
+	 *
+	 * Le site n'enregistre rien : le webhook est la seule sortie d'une demande.
+	 * Sans lui, chaque envoi est refusé — la personne le voit tout de suite, ce
+	 * qui vaut mieux qu'un silence, mais le formulaire est inutilisable.
+	 *
+	 * C'est le défaut le plus probable d'une mise en ligne : la définition est
+	 * livrée avec un `webhook` vide, et personne ne s'en aperçoit avant la
+	 * première demande perdue.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function sonde_relais_declares(): array {
+		if ( ! function_exists( 'Anode\Forms\definitions_dir' ) ) {
+			return $this->sonde( 'forms-relais', true, '', 'moteur de formulaire absent' );
+		}
+
+		$sans = [];
+
+		foreach ( glob( \Anode\Forms\definitions_dir() . '/*.json' ) ?: [] as $fichier ) {
+			$definition = json_decode( (string) file_get_contents( $fichier ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+
+			if ( ! is_array( $definition ) ) {
+				continue;
+			}
+
+			$urls = array_filter(
+				array_map(
+					'trim',
+					array_merge(
+						[ (string) ( $definition['webhook'] ?? '' ) ],
+						array_map( 'strval', (array) ( $definition['webhooks'] ?? [] ) )
+					)
+				)
+			);
+
+			if ( ! $urls ) {
+				$sans[] = basename( $fichier, '.json' );
+			}
+		}
+
+		if ( ! $sans ) {
+			return $this->sonde( 'forms-relais', true, '', 'tous les formulaires ont un relais' );
+		}
+
+		/*
+		 * Hors production, l'absence de relais est attendue : un blueprint et
+		 * une préproduction n'ont pas d'adresse où envoyer. La signaler comme un
+		 * défaut rendrait la santé rouge en permanence — et une alerte
+		 * permanente ne se lit plus.
+		 *
+		 * En production, c'est l'inverse : le formulaire est en place, stylé, et
+		 * chaque envoi part à la poubelle avec un 502. C'est la faute la plus
+		 * probable d'une mise en ligne, puisque la définition est livrée avec un
+		 * webhook vide.
+		 */
+		$production = 'production' === wp_get_environment_type();
+
+		return $this->sonde(
+			'forms-relais',
+			! $production,
+			sprintf(
+				'aucun webhook déclaré pour : %s. Le site n’enregistre rien — chaque envoi de ces formulaires sera refusé.',
+				implode( ', ', $sans )
+			),
+			sprintf(
+				'aucun webhook pour %s — attendu hors production, à renseigner avant la mise en ligne',
+				implode( ', ', $sans )
+			)
+		);
 	}
 
 	/**

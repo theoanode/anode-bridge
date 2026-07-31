@@ -46,6 +46,15 @@ final class Rest_Health {
 		'anode-forms'        => [ 'symbole' => 'Anode\Forms\definitions_dir', 'genre' => 'function' ],
 		'anode-redirections' => [ 'symbole' => 'Anode\Redirections\table_path', 'genre' => 'function' ],
 		'anode-updater'      => [ 'symbole' => 'Anode\Updater\Updater', 'genre' => 'class' ],
+		/*
+		 * Le confort du builder manquait à cette liste, et le manque était symétrique
+		 * dans les deux blueprints. Conséquence : le composant pouvait être absent,
+		 * non chargé, ou servi sans ses ressources, et `wp_health` répondait « tous
+		 * les composants au vert ». C'est exactement le défaut que le commentaire des
+		 * quatre composants voisins décrit — une liste écrite pour ce qui existait ce
+		 * jour-là, que personne ne complète quand un composant arrive.
+		 */
+		'anode-builder'      => [ 'symbole' => 'Anode\Builder\fonctions_actives', 'genre' => 'function' ],
 	];
 
 	public function register_routes(): void {
@@ -235,6 +244,9 @@ final class Rest_Health {
 
 			case 'anode-updater':
 				return $this->sondes_updater();
+
+			case 'anode-builder':
+				return $this->sondes_builder();
 
 			case 'anode-bridge':
 				return $this->sondes_bridge();
@@ -609,6 +621,52 @@ final class Rest_Health {
 				! $existe || (bool) has_action( 'template_redirect' ),
 				'la table existe mais aucun template_redirect n’est branché.',
 				'redirections branchées'
+			),
+		];
+	}
+
+	/**
+	 * Le confort du builder.
+	 *
+	 * Deux choses peuvent le rendre inerte sans rien casser d'apparent, et aucune
+	 * ne se voit dans le builder tant qu'on ne cherche pas : ses **ressources**
+	 * absentes — le composant est alors chargé, ses réglages sont lus, et le
+	 * navigateur reçoit deux URL en 404 —, et **toutes ses fonctions éteintes** par
+	 * le filtre, auquel cas il ne sert rien du tout et c'est peut-être voulu.
+	 *
+	 * On ne sonde pas ce qu'il fait dans le builder : cela demande un vrai
+	 * navigateur, et c'est le rôle de `bin/test-builder-interactions.mjs`. Ici, on
+	 * répond à « le composant peut-il seulement agir ? ».
+	 *
+	 * @return list<array{id: string, ok: bool, detail: string}>
+	 */
+	private function sondes_builder(): array {
+		$actives = \Anode\Builder\fonctions_actives();
+		$allumees = array_keys( array_filter( $actives ) );
+
+		$manquants = [];
+
+		foreach ( [ 'builder.js', 'builder.css' ] as $fichier ) {
+			if ( ! is_readable( WPMU_PLUGIN_DIR . '/anode-builder/assets/' . $fichier ) ) {
+				$manquants[] = $fichier;
+			}
+		}
+
+		return [
+			$this->sonde(
+				'builder-assets',
+				! $manquants,
+				sprintf(
+					'ressource(s) absente(s) : %s. Le composant est chargé mais le navigateur reçoit un 404 — aucune des fonctions n’agit.',
+					implode( ', ', $manquants )
+				),
+				sprintf( '%d fonction(s) active(s) : %s', count( $allumees ), implode( ', ', $allumees ) ?: 'aucune' )
+			),
+			$this->sonde(
+				'builder-fonctions',
+				(bool) $allumees,
+				'les trois fonctions sont éteintes par le filtre anode/builder/fonctions : le composant ne sert à rien.',
+				'au moins une fonction active'
 			),
 		];
 	}

@@ -686,7 +686,17 @@ final class Rest_Health {
 					'ressource(s) absente(s) : %s. Le composant est chargé mais le navigateur reçoit un 404 — aucune des fonctions n’agit.',
 					implode( ', ', $manquants )
 				),
-				sprintf( '%d fonction(s) active(s) : %s', count( $allumees ), implode( ', ', $allumees ) ?: 'aucune' )
+				/*
+				 * Le message dit ce que la sonde a mesuré, et rien d'autre.
+				 *
+				 * Il annonçait le nombre de fonctions actives — la mesure de
+				 * `builder-fonctions`, pas la sienne. Deux conséquences : on lisait
+				 * « assets » au vert en croyant l'avoir vérifié alors qu'on lisait
+				 * autre chose, et un site aux ressources en place mais aux fonctions
+				 * toutes éteintes affichait « 0 fonction(s) active(s) : aucune » sur
+				 * une sonde **verte**.
+				 */
+				'builder.js et builder.css lisibles'
 			),
 			$this->sonde(
 				'builder-fonctions',

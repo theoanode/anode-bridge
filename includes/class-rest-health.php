@@ -332,15 +332,16 @@ final class Rest_Health {
 		}
 
 		/*
-		 * Hors production, l'absence de relais est attendue : un blueprint et
-		 * une préproduction n'ont pas d'adresse où envoyer. La signaler comme un
-		 * défaut rendrait la santé rouge en permanence — et une alerte
-		 * permanente ne se lit plus.
+		 * Hors production, l'absence de relais reste attendue : un blueprint neuf
+		 * n'a pas d'adresse où envoyer, et rendre la santé rouge en permanence
+		 * ferait une alerte qu'on ne lit plus.
 		 *
-		 * En production, c'est l'inverse : le formulaire est en place, stylé, et
-		 * chaque envoi part à la poubelle avec un 502. C'est la faute la plus
-		 * probable d'une mise en ligne, puisque la définition est livrée avec un
-		 * webhook vide.
+		 * Mais le détail ne dit plus « à renseigner avant la mise en ligne » : ces
+		 * formulaires **refusent déjà** les envois, sur tous les environnements,
+		 * et c'est voulu. La formulation précédente laissait croire que la
+		 * préproduction acceptait les demandes en attendant — elle les acceptait
+		 * en effet, et les jetait en répondant « merci ». Le comportement a été
+		 * corrigé ; ce message était la seule trace qui l'annonçait de travers.
 		 */
 		$production = 'production' === wp_get_environment_type();
 
@@ -348,11 +349,11 @@ final class Rest_Health {
 			'forms-relais',
 			! $production,
 			sprintf(
-				'aucun webhook déclaré pour : %s. Le site n’enregistre rien — chaque envoi de ces formulaires sera refusé.',
+				'aucun webhook déclaré pour : %s. Le site n’enregistre rien — chaque envoi de ces formulaires est refusé.',
 				implode( ', ', $sans )
 			),
 			sprintf(
-				'aucun webhook pour %s — attendu hors production, à renseigner avant la mise en ligne',
+				'aucun webhook pour %s : leurs envois sont refusés, ce qui est attendu hors production',
 				implode( ', ', $sans )
 			)
 		);
@@ -542,6 +543,41 @@ final class Rest_Health {
 				$tierce || (bool) has_filter( 'pre_get_document_title' ) || (bool) has_filter( 'document_title_parts' ),
 				'aucun filtre de titre : la balise <title> reste celle de WordPress.',
 				$tierce ? 'titre laissé à l’extension tierce' : 'titre piloté par anode-seo'
+			),
+			/*
+			 * Un domaine de recette traité en production.
+			 *
+			 * `wp_get_environment_type()` rend « production » quand rien n'est
+			 * déclaré, et c'est l'état par défaut d'une installation neuve. Sur une
+			 * préproduction, cette valeur ouvre le `robots.txt`, retire le
+			 * `noindex`, et fait poser un an de HSTS. Mesuré en ligne : une
+			 * préproduction du parc était dans cet état, et son seul filet était
+			 * `blog_public`, une case décochable depuis les réglages de WordPress.
+			 *
+			 * La sonde ne se fie donc pas à la déclaration : elle la confronte au
+			 * domaine, qui est le seul indice disponible quand personne n'a rien
+			 * dit.
+			 */
+			/*
+			 * `is_callable` et non `method_exists` : celle-ci répond « oui » pour
+			 * une méthode privée, et c'est ce qui a fait tomber le point de santé
+			 * en erreur fatale sur un site où `anode-seo` était d'une version
+			 * antérieure. Un contrôle de santé est ce qu'on appelle quand quelque
+			 * chose va mal — il ne doit jamais être la chose qui casse. Un
+			 * composant plus ancien rend donc la sonde muette, pas mortelle.
+			 */
+			$this->sonde(
+				'seo-environnement',
+				! is_callable( [ \Anode\Seo\Seo::class, 'host_looks_transient' ] )
+					|| ! \Anode\Seo\Seo::host_looks_transient()
+					|| 'production' !== wp_get_environment_type(),
+				sprintf(
+					'le domaine « %s » est un domaine de recette, mais l’environnement vaut « production » : robots.txt ouvert, aucun noindex, HSTS posé pour un an. Déclarer WP_ENVIRONMENT_TYPE dans wp-config.php.',
+					(string) wp_parse_url( home_url(), PHP_URL_HOST )
+				),
+				is_callable( [ \Anode\Seo\Seo::class, 'host_looks_transient' ] )
+					? sprintf( 'environnement « %s », cohérent avec le domaine', wp_get_environment_type() )
+					: 'non mesuré : anode-seo est d’une version antérieure à 1.3.0'
 			),
 		];
 	}

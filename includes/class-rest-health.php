@@ -367,7 +367,8 @@ final class Rest_Health {
 			return $this->sonde( 'forms-relais', true, '', 'moteur de formulaire absent' );
 		}
 
-		$sans = [];
+		$sans         = [];
+		$a_referencer = [];
 
 		foreach ( glob( \Anode\Forms\definitions_dir() . '/*.json' ) ?: [] as $fichier ) {
 			$definition = json_decode( (string) file_get_contents( $fichier ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
@@ -376,19 +377,59 @@ final class Rest_Health {
 				continue;
 			}
 
-			$urls = array_filter(
-				array_map(
-					'trim',
-					array_merge(
-						[ (string) ( $definition['webhook'] ?? '' ) ],
-						array_map( 'strval', (array) ( $definition['webhooks'] ?? [] ) )
-					)
-				)
-			);
+			/*
+			 * La question posée est « le moteur enverra-t-il ? », donc c'est le
+			 * moteur qu'on interroge — pas une seconde lecture du fichier.
+			 *
+			 * La sonde relevait auparavant les chaînes non vides elle-même. Deux
+			 * écarts en découlaient, et le second est celui qui compte : une
+			 * adresse en `http://` ou une référence `constante:X` dont la
+			 * constante n'existe pas sur cette installation sont des chaînes non
+			 * vides. La sonde répondait « tous les formulaires ont un relais »
+			 * pendant que chaque envoi partait en 502 — exactement le vert
+			 * trompeur que cette sonde existe pour empêcher.
+			 */
+			$retenues = \Anode\Forms\relais_declares( $definition );
 
-			if ( ! $urls ) {
-				$sans[] = basename( $fichier, '.json' );
+			if ( $retenues ) {
+				continue;
 			}
+
+			$nom        = basename( $fichier, '.json' );
+			$manquantes = function_exists( 'Anode\Forms\references_non_resolues' )
+				? \Anode\Forms\references_non_resolues( $definition )
+				: [];
+
+			if ( $manquantes ) {
+				$a_referencer[] = sprintf( '%s → %s', $nom, implode( ', ', $manquantes ) );
+
+				continue;
+			}
+
+			$sans[] = $nom;
+		}
+
+		/*
+		 * Une constante absente se dit à part : le fichier versionné est
+		 * correct, il nomme sa destination, et le geste de réparation tient en
+		 * une ligne sur ce serveur-ci. Le confondre avec « aucun relais »
+		 * envoyait relire un fichier qui n'a rien à corriger.
+		 *
+		 * C'est une erreur sur tous les environnements, blueprint compris : un
+		 * blueprint n'a pas de relais du tout, il n'en référence donc aucun. Une
+		 * référence posée est une intention explicite, et une intention non
+		 * satisfaite n'a pas d'environnement où elle serait acceptable.
+		 */
+		if ( $a_referencer ) {
+			return $this->sonde(
+				'forms-relais',
+				false,
+				sprintf(
+					'relais référencé mais absent de wp-config.php : %s. Chaque envoi de ces formulaires est refusé — poser la constante (wp config set <NOM> "https://…" --type=constant).',
+					implode( ' ; ', $a_referencer )
+				),
+				''
+			);
 		}
 
 		if ( ! $sans ) {

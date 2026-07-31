@@ -294,7 +294,59 @@ final class Rest_Health {
 			),
 			$this->sonde_fichiers_proteges(),
 			$this->sonde_relais_declares(),
+			$this->sonde_clefs_connues(),
 		];
+	}
+
+	/**
+	 * Une définition porte-t-elle un réglage que le moteur ne lit pas ?
+	 *
+	 * Le moteur ignore en silence toute clé inconnue. Mesuré sur Niort Tech :
+	 * `contact.json` et `reservation.json` portaient encore
+	 * `"notify": "contact@niort-tech.fr"`, restée là quand l'envoi de courriel
+	 * est parti avec le stockage des demandes. Les fichiers annonçaient donc un
+	 * destinataire que plus une ligne ne lisait — et la sonde voisine, qui ne
+	 * regarde que la présence d'un relais, n'avait rien à en dire.
+	 *
+	 * Une clé morte qui nomme une destination se lit comme un formulaire
+	 * branché : c'est le contraire d'un détail de rangement.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function sonde_clefs_connues(): array {
+		if ( ! function_exists( 'Anode\Forms\clefs_inconnues' ) || ! function_exists( 'Anode\Forms\definitions_dir' ) ) {
+			return $this->sonde( 'forms-clefs', true, '', 'moteur de formulaire absent' );
+		}
+
+		$fautives = [];
+
+		foreach ( glob( \Anode\Forms\definitions_dir() . '/*.json' ) ?: [] as $fichier ) {
+			$definition = json_decode( (string) file_get_contents( $fichier ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+
+			if ( ! is_array( $definition ) ) {
+				continue;
+			}
+
+			$inconnues = \Anode\Forms\clefs_inconnues( $definition );
+
+			if ( $inconnues ) {
+				$fautives[] = sprintf( '%s (%s)', basename( $fichier, '.json' ), implode( ', ', $inconnues ) );
+			}
+		}
+
+		if ( ! $fautives ) {
+			return $this->sonde( 'forms-clefs', true, '', 'aucun réglage mort dans les définitions' );
+		}
+
+		return $this->sonde(
+			'forms-clefs',
+			false,
+			sprintf(
+				'réglage(s) que le moteur ne lit pas : %s. Une clé morte qui nomme une destination donne à lire un formulaire branché.',
+				implode( ' ; ', $fautives )
+			),
+			''
+		);
 	}
 
 	/**

@@ -720,7 +720,77 @@ final class Rest_Health {
 				),
 				'dernière vérification sans erreur'
 			),
+			$this->sonde_jeton( $etat ),
 		];
+	}
+
+	/**
+	 * Le canal de mise à jour est-il réellement ouvert ?
+	 *
+	 * **Cette sonde vaut pour tous les sites, blueprints compris.** Contrairement
+	 * aux webhooks — qu'un blueprint n'aura jamais — le jeton est nécessaire
+	 * partout : sans lui, aucun site ne reçoit plus rien, et un blueprint qui ne se
+	 * met plus à jour est un blueprint qu'on clonera périmé.
+	 *
+	 * Elle existe parce que la précédente réussissait à vide. `updater-derniere-verif`
+	 * lisait `! is_array( $etat ) || empty( $etat['erreur'] )` : un site qui n'a
+	 * **jamais** vérifié n'a pas d'état, la condition est donc vraie, et le vert
+	 * était rendu. Un site fraîchement mis en ligne, sans jeton, passait — c'est
+	 * précisément le moment où il fallait crier.
+	 *
+	 * Trois états distincts, parce qu'ils appellent trois gestes différents : la
+	 * constante manque · elle est là mais un dépôt reste inatteignable — jeton
+	 * périmé, ou dépôt hors de sa portée · rien n'a jamais tourné.
+	 *
+	 * @param mixed $etat État de la dernière vérification.
+	 * @return array{id: string, ok: bool, detail: string}
+	 */
+	private function sonde_jeton( $etat ): array {
+		$pose = defined( 'ANODE_GITHUB_TOKEN' )
+			&& is_string( constant( 'ANODE_GITHUB_TOKEN' ) )
+			&& '' !== trim( (string) constant( 'ANODE_GITHUB_TOKEN' ) );
+
+		if ( ! $pose ) {
+			return $this->sonde(
+				'updater-jeton',
+				false,
+				'ANODE_GITHUB_TOKEN n’est pas défini dans wp-config.php : les dépôts sont privés, '
+					. 'donc **aucune mise à jour n’arrivera jamais** sur ce site — et rien d’autre ne le dira. '
+					. 'wp config set ANODE_GITHUB_TOKEN "$(cat ~/.config/anode-wp/jeton-theoanode)" --type=constant',
+				''
+			);
+		}
+
+		$composants = is_array( $etat ) && is_array( $etat['composants'] ?? null ) ? $etat['composants'] : null;
+
+		if ( null === $composants ) {
+			return $this->sonde(
+				'updater-jeton',
+				false,
+				'le jeton est posé, mais aucune vérification n’a jamais abouti : on ne sait pas s’il fonctionne. '
+					. 'Lancer une passe et lire le résultat.',
+				''
+			);
+		}
+
+		$muets = [];
+
+		foreach ( $composants as $nom => $ligne ) {
+			if ( in_array( $ligne['etat'] ?? '', [ 'erreur', 'depot-absent' ], true ) ) {
+				$muets[] = (string) $nom;
+			}
+		}
+
+		return $this->sonde(
+			'updater-jeton',
+			! $muets,
+			sprintf(
+				'dépôt inatteignable pour : %s. Jeton périmé, ou dépôt hors de sa portée — '
+					. 'sur tous les composants à la fois, c’est le jeton ; sur un seul, c’est sa portée.',
+				implode( ', ', $muets )
+			),
+			sprintf( 'canal ouvert — %d composant(s) joignable(s)', count( $composants ) )
+		);
 	}
 
 	/** @return list<array{id: string, ok: bool, detail: string}> */

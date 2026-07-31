@@ -1585,6 +1585,52 @@ final class Rest_Bricks {
 	}
 
 	/**
+	 * Décide les conditions d'affichage à écrire pour un template.
+	 *
+	 * Ce que cette méthode empêche est arrivé, mesuré le 31/07/2026 sur un site
+	 * en ligne : mettre à jour le gabarit du template « 404 » sans en
+	 * repasser les conditions écrasait `templateConditions` par « any », et
+	 * Bricks servait alors la page d'erreur **à la place de tout le site** —
+	 * accueil comprise, en HTTP 200. L'appel avait pourtant répondu « mis à jour
+	 * avec 10 élément(s) », sans un mot sur la condition remplacée.
+	 *
+	 * Trois règles, dans cet ordre :
+	 *
+	 *   1. des conditions fournies font foi ;
+	 *   2. sinon, celles déjà en base sont **conservées** — une mise à jour de
+	 *      contenu n'a aucune raison de déplacer un template ;
+	 *   3. sinon seulement, un défaut déduit du type.
+	 *
+	 * Le défaut par type compte autant que le reste : « any » sur un template
+	 * `error` ou `search` est précisément la valeur qui capture le site entier,
+	 * alors que Bricks a une condition dédiée pour chacun (`includes/templates.php`,
+	 * `case 'error'` → `is_404()`, `case 'search'` → `is_search()`).
+	 *
+	 * @param mixed      $fournies    Conditions passées par l'appelant.
+	 * @param mixed      $existantes  Conditions déjà stockées, s'il y en a.
+	 * @param string     $type        Type du template.
+	 */
+	private static function conditions_du_template( $fournies, $existantes, string $type ): array {
+		if ( is_array( $fournies ) && $fournies ) {
+			return $fournies;
+		}
+
+		if ( is_array( $existantes ) && $existantes ) {
+			return $existantes;
+		}
+
+		// « any » est la clé que Bricks attend pour « tout le site » — vérifiée
+		// dans le code du thème, l'intitulé de l'interface n'est pas la clé
+		// stockée. Elle ne convient qu'aux types servis partout.
+		$par_type = [
+			'error'  => [ [ 'main' => 'error' ] ],
+			'search' => [ [ 'main' => 'search' ] ],
+		];
+
+		return $par_type[ $type ] ?? [ [ 'main' => 'any' ] ];
+	}
+
+	/**
 	 * Crée ou met à jour un template Bricks (en-tête, pied de page, section…).
 	 *
 	 * Le type `bricks_template` n'est pas exposé à l'API REST standard : sans
@@ -1667,21 +1713,14 @@ final class Rest_Bricks {
 			Bricks_Adapter::set_elements( $template_id, $elements, $area );
 		}
 
-		/*
-		 * Sans condition d'affichage, Bricks n'applique le template nulle part.
-		 * La valeur « any » est celle que Bricks attend pour « tout le site »
-		 * (includes/templates.php, case 'any') — vérifiée dans le code du
-		 * thème, l'intitulé de l'interface n'est pas la clé stockée.
-		 */
-		$conditions = $request->get_param( 'conditions' );
+		$settings = get_post_meta( $template_id, Bricks_Adapter::META_TEMPLATE_SETTINGS, true );
+		$settings = is_array( $settings ) ? $settings : [];
 
-		if ( ! is_array( $conditions ) || ! $conditions ) {
-			$conditions = [ [ 'main' => 'any' ] ];
-		}
-
-		$settings          = get_post_meta( $template_id, Bricks_Adapter::META_TEMPLATE_SETTINGS, true );
-		$settings          = is_array( $settings ) ? $settings : [];
-		$settings['templateConditions'] = $conditions;
+		$settings['templateConditions'] = self::conditions_du_template(
+			$request->get_param( 'conditions' ),
+			$settings['templateConditions'] ?? null,
+			$type
+		);
 
 		update_post_meta( $template_id, Bricks_Adapter::META_TEMPLATE_SETTINGS, $settings );
 

@@ -870,6 +870,90 @@ test(
 	}
 );
 
+/* --- Conditions d'affichage d'un template ---------------------------- */
+
+echo "\nConditions d’affichage d’un template\n";
+
+/**
+ * Ces cas sont relevés, pas imaginés.
+ *
+ * Le 31/07/2026, poser le gabarit dans le template « 404 » d'un site en ligne
+ * sans en repasser les conditions a remplacé `templateConditions` par « any ».
+ * Bricks a alors servi la page d'erreur à la place de **tout** le site —
+ * accueil comprise, en HTTP 200 — et l'appel avait répondu « mis à jour avec
+ * 10 élément(s) ».
+ */
+$conditions = new ReflectionMethod( \Anode\Bridge\Rest_Bricks::class, 'conditions_du_template' );
+
+test(
+	'des conditions fournies font foi',
+	function () use ( $conditions ): void {
+		$voulues = [ [ 'main' => 'archiveType', 'archiveType' => [ 'postType' ] ] ];
+
+		assert_true(
+			$voulues === $conditions->invoke( null, $voulues, [ [ 'main' => 'any' ] ], 'archive' ),
+			'l’appelant décide quand il se prononce'
+		);
+	}
+);
+
+test(
+	'une mise à jour sans conditions conserve celles du site',
+	function () use ( $conditions ): void {
+		/*
+		 * Les conditions posées ici sont volontairement **différentes** du défaut
+		 * que le type produirait : sans cela, le test passerait aussi bien si la
+		 * conservation n'était pas implémentée du tout. C'est le piège du test
+		 * qui ne peut pas échouer.
+		 */
+		$posees = [ [ 'main' => 'ids', 'ids' => [ 42 ] ] ];
+
+		assert_true(
+			$posees === $conditions->invoke( null, null, $posees, 'content' ),
+			'écraser une condition existante déplace un template que personne n’a demandé à déplacer'
+		);
+
+		$restreinte = [ [ 'main' => 'error' ], [ 'main' => 'search' ] ];
+
+		assert_true(
+			$restreinte === $conditions->invoke( null, null, $restreinte, 'error' ),
+			'même sur un type qui a un défaut, c’est le site qui fait foi'
+		);
+	}
+);
+
+test(
+	'un template « error » créé sans conditions ne capture pas le site',
+	function () use ( $conditions ): void {
+		$resultat = $conditions->invoke( null, null, null, 'error' );
+
+		assert_true(
+			[ [ 'main' => 'error' ] ] === $resultat,
+			'« any » sur un type error sert la page d’erreur partout : c’est le défaut mesuré le 31/07/2026'
+		);
+	}
+);
+
+test(
+	'un template « search » créé sans conditions vise la recherche',
+	function () use ( $conditions ): void {
+		assert_true(
+			[ [ 'main' => 'search' ] ] === $conditions->invoke( null, null, null, 'search' ),
+			'Bricks a une condition dédiée (includes/templates.php, case « search »)'
+		);
+	}
+);
+
+test(
+	'un type servi partout garde bien « any »',
+	function () use ( $conditions ): void {
+		assert_true(
+			[ [ 'main' => 'any' ] ] === $conditions->invoke( null, null, [], 'content' ),
+			'sans condition, Bricks n’applique un template nulle part'
+		);
+	}
+);
+
 /* --- Variables ------------------------------------------------------ */
 
 echo "\nVariables globales\n";

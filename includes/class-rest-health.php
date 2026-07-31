@@ -344,9 +344,35 @@ final class Rest_Health {
 		}
 
 		/*
-		 * Hors production, l'absence de relais reste attendue : un blueprint neuf
-		 * n'a pas d'adresse où envoyer, et rendre la santé rouge en permanence
-		 * ferait une alerte qu'on ne lit plus.
+		 * Un blueprint n'a pas de relais, et n'en aura jamais.
+		 *
+		 * La distinction manquait : le contrôle raisonnait par environnement, donc
+		 * il traitait un blueprint comme une préproduction de client — « à
+		 * renseigner avant la mise en ligne ». Or on ne crée pas un scénario n8n
+		 * pour un blueprint : ses formulaires sont là pour être copiés, pas pour
+		 * recevoir. Insister revient à demander une chose qui n'arrivera pas, et
+		 * une exigence qu'on sait ne pas devoir satisfaire est une exigence qu'on
+		 * cesse de lire — y compris sur les sites où elle compte.
+		 *
+		 * Un vrai site, lui, garde l'exigence entière : informative tant qu'il
+		 * n'est pas en production, bloquante ensuite.
+		 */
+		if ( defined( 'ANODE_BLUEPRINT' ) && constant( 'ANODE_BLUEPRINT' ) ) {
+			return $this->sonde(
+				'forms-relais',
+				true,
+				'',
+				sprintf(
+					'blueprint : aucun relais attendu pour %s — leurs envois sont refusés, ce qui est le comportement voulu',
+					implode( ', ', $sans )
+				)
+			);
+		}
+
+		/*
+		 * Hors production, l'absence de relais reste attendue : un site en
+		 * construction n'a pas encore d'adresse où envoyer, et rendre la santé
+		 * rouge en permanence ferait une alerte qu'on ne lit plus.
 		 *
 		 * Mais le détail ne dit plus « à renseigner avant la mise en ligne » : ces
 		 * formulaires **refusent déjà** les envois, sur tous les environnements,

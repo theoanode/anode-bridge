@@ -782,8 +782,91 @@ final class Rest_Health {
 				),
 				'dernière vérification sans erreur'
 			),
+			$this->sonde_age( $etat ),
 			$this->sonde_jeton( $etat ),
 		];
+	}
+
+	/**
+	 * Depuis combien de jours l'absence de vérification cesse d'être un aléa.
+	 *
+	 * La passe est quotidienne : deux rendez-vous manqués d'affilée ne
+	 * s'expliquent plus par l'ordonnancement.
+	 */
+	private const VERIF_JOURS = 3;
+
+	/**
+	 * La dernière vérification est-elle trop vieille pour engager quoi que ce soit ?
+	 *
+	 * Les trois sondes de l'updater lisaient toutes le **même état stocké**, et
+	 * aucune ne regardait sa date. `sonde_jeton` en particulier annonce « canal
+	 * ouvert — N composant(s) joignable(s) » à partir de `$etat['composants']`,
+	 * sans appeler GitHub : c'est le compte rendu de la dernière passe, quel que
+	 * soit son âge. Un site dont le cron a cessé de tourner garde donc son
+	 * dernier état — pas d'erreur, tous les dépôts joignables — et rend trois
+	 * voyants verts sur un canal qui ne reçoit plus rien.
+	 *
+	 * C'est exactement le défaut qui a fait naître `sonde_jeton` — un vert rendu
+	 * à vide — mais repoussé d'un cran : corrigé pour « n'a jamais tourné », pas
+	 * pour « ne tourne plus ». Sur un parc qui exige désormais une signature, un
+	 * canal muet ne se contente pas de retarder une fonctionnalité : il retient
+	 * les correctifs de sécurité, et rien ne le dit.
+	 *
+	 * La date est déjà écrite à chaque passe (`verifie_le`, planificateur) — il
+	 * n'y avait qu'à la lire.
+	 *
+	 * @param mixed $etat État de la dernière vérification.
+	 * @return array{id: string, ok: bool, detail: string}
+	 */
+	private function sonde_age( $etat ): array {
+		$verifie_le = is_array( $etat ) ? ( $etat['verifie_le'] ?? null ) : null;
+
+		return $this->sonde(
+			'updater-fraicheur',
+			null === self::verification_perimee( $verifie_le, time() ),
+			(string) self::verification_perimee( $verifie_le, time() ),
+			is_string( $verifie_le ) && '' !== $verifie_le
+				? sprintf( 'dernière passe le %s', $verifie_le )
+				: 'aucune passe enregistrée'
+		);
+	}
+
+	/**
+	 * Motif du refus, ou null si la dernière passe est assez récente.
+	 *
+	 * Séparée de la sonde pour être vérifiable sans WordPress — c'est la règle,
+	 * pas l'enveloppe, qui décide.
+	 *
+	 * Un état sans date n'est pas traité comme périmé : `sonde_jeton` couvre
+	 * déjà « rien n'a jamais tourné », et rendre deux rouges pour un seul fait
+	 * ferait chercher deux causes.
+	 *
+	 * @param mixed $verifie_le Date ISO 8601 de la dernière passe.
+	 */
+	public static function verification_perimee( $verifie_le, int $maintenant, int $jours = self::VERIF_JOURS ): ?string {
+		if ( ! is_string( $verifie_le ) || '' === trim( $verifie_le ) ) {
+			return null;
+		}
+
+		$date = strtotime( $verifie_le );
+
+		if ( false === $date ) {
+			return sprintf( 'date de dernière vérification illisible : « %s »', $verifie_le );
+		}
+
+		$ecart = (int) floor( ( $maintenant - $date ) / DAY_IN_SECONDS );
+
+		if ( $ecart < $jours ) {
+			return null;
+		}
+
+		return sprintf(
+			'aucune vérification de mise à jour depuis %d jour(s) : la passe est quotidienne, donc le planificateur '
+				. 'ne tourne plus. Les autres sondes restent au vert — elles relisent le dernier état, sans le dater. '
+				. 'Cause la plus fréquente : wp-cron.php inatteignable (authentification HTTP de préproduction, ou '
+				. 'DISABLE_WP_CRON sans tâche système en relais).',
+			$ecart
+		);
 	}
 
 	/**

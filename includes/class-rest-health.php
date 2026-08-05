@@ -55,6 +55,17 @@ final class Rest_Health {
 		 * jour-là, que personne ne complète quand un composant arrive.
 		 */
 		'anode-builder'      => [ 'symbole' => 'Anode\Builder\fonctions_actives', 'genre' => 'function' ],
+		/*
+		 * Et le manque s'est reproduit, une troisième fois, avec les animations :
+		 * le composant est arrivé dans le blueprint le 04/08/2026, personne n'a
+		 * complété cette liste, et `wp_health` répondait « tous les composants au
+		 * vert » sur un site qui n'en avait que huit sur neuf. Le commentaire
+		 * ci-dessus **décrivait** déjà le défaut — un commentaire ne l'empêche pas.
+		 *
+		 * C'est pourquoi `hors_liste()` existe désormais : la liste ne peut plus
+		 * être en retard sur le disque sans que la réponse le dise.
+		 */
+		'anode-animations'   => [ 'symbole' => 'Anode\Animations\Animations', 'genre' => 'class' ],
 	];
 
 	public function register_routes(): void {
@@ -129,14 +140,31 @@ final class Rest_Health {
 			$composants[] = $entree;
 		}
 
-		// Le pont lui-même : il répond, donc il tourne.
+		/*
+		 * Le pont lui-même : il répond, donc il tourne.
+		 *
+		 * Son entrée est ajoutée **après** la boucle ci-dessus — donc après la
+		 * collecte des problèmes. Conséquence mesurée le 04/08/2026 : un site
+		 * répondait « ok: true, problems: 0 » avec la sonde `site-favicon` du pont
+		 * au rouge. Toutes les sondes du pont étaient muettes depuis qu'elles
+		 * existent, et le point de santé annonçait le contraire de ce qu'il avait
+		 * mesuré. Ses échecs sont donc reversés explicitement.
+		 */
+		$sondes_pont = $this->sondes( 'anode-bridge' );
+
 		$composants[] = [
 			'name'    => 'anode-bridge',
 			'present' => true,
 			'loaded'  => true,
 			'version' => ANODE_BRIDGE_VERSION,
-			'checks'  => $this->sondes( 'anode-bridge' ),
+			'checks'  => $sondes_pont,
 		];
+
+		foreach ( $sondes_pont as $sonde ) {
+			if ( ! $sonde['ok'] ) {
+				$problemes[] = sprintf( 'anode-bridge : %s', $sonde['detail'] );
+			}
+		}
 
 		/*
 		 * Une copie dans `plugins/` est inerte : le chargeur ne lit que les
@@ -160,6 +188,21 @@ final class Rest_Health {
 					$nom
 				);
 			}
+		}
+
+		/*
+		 * La liste peut être en retard sur le disque — c'est arrivé trois fois. On
+		 * le dit avant de conclure quoi que ce soit sur la santé du site : un
+		 * composant hors liste n'est ni sondé, ni versionné dans la réponse, et son
+		 * absence de la liste se lit exactement comme sa conformité.
+		 */
+		$inconnus = $this->hors_liste( $mu );
+
+		foreach ( $inconnus as $nom ) {
+			$problemes[] = sprintf(
+				'%s : présent dans mu-plugins/ mais **absent de la liste des composants** du pont. Il n’est donc ni sondé ni suivi — sa version n’est pas relevée et une panne y serait muette. À déclarer dans Rest_Health::COMPOSANTS.',
+				$nom
+			);
 		}
 
 		$fatales = $this->fatales_recentes();
@@ -194,6 +237,7 @@ final class Rest_Health {
 				],
 				'loader'      => $loader,
 				'components'  => $composants,
+				'unlisted'    => $inconnus,
 				'shadowed'    => $doublons,
 				'fatals'      => $journal,
 				'problems'    => $problemes,
@@ -247,6 +291,9 @@ final class Rest_Health {
 
 			case 'anode-builder':
 				return $this->sondes_builder();
+
+			case 'anode-animations':
+				return $this->sondes_animations();
 
 			case 'anode-bridge':
 				return $this->sondes_bridge();
@@ -798,6 +845,84 @@ final class Rest_Health {
 				'au moins une fonction active'
 			),
 		];
+	}
+
+	/**
+	 * Les animations : chargées ne suffit pas, il faut qu'elles soient accrochées.
+	 *
+	 * Le composant n'expose ni option, ni table, ni route : tout son effet passe
+	 * par deux accroches posées dans `boot()`. Un fichier chargé dont `boot()` n'a
+	 * jamais été appelé — inclusion sans amorçage, `remove_action` d'un thème —
+	 * laisse donc la classe en mémoire et la page **sans une ligne de CSS**.
+	 *
+	 * Et ce cas-là ne se voit sur aucune capture : sans le CSS, `[animate]` n'est
+	 * plus masqué, donc tout s'affiche — normalement, à l'état final, sans
+	 * animation. Le site paraît juste « sans effets », ce qu'on met sur le compte
+	 * d'un choix de conception.
+	 *
+	 * @return list<array{id: string, ok: bool, detail: string}>
+	 */
+	private function sondes_animations(): array {
+		$symbole = [ 'Anode\Animations\Animations', 'inject_css' ];
+		$css     = has_action( 'wp_head', $symbole );
+		$js      = has_action( 'wp_footer', [ 'Anode\Animations\Animations', 'inject_js' ] );
+
+		return [
+			$this->sonde(
+				'animations-accroches',
+				false !== $css && false !== $js,
+				sprintf(
+					'accroche(s) absente(s) : %s. La classe est en mémoire mais rien n’est injecté — les éléments animés s’affichent à l’état final, sans animation, et rien ne le signale.',
+					implode( ', ', array_filter( [ false === $css ? 'wp_head' : null, false === $js ? 'wp_footer' : null ] ) )
+				),
+				'CSS et moteur accrochés à la page'
+			),
+		];
+	}
+
+	/**
+	 * Un composant sur le disque que cette classe ne connaît pas.
+	 *
+	 * Trois fois de suite, la liste `COMPOSANTS` a été en retard sur le blueprint :
+	 * les quatre composants propres à un blueprint, puis le confort du builder,
+	 * puis les animations. Chaque fois, la réponse annonçait « tous les composants
+	 * au vert » en en ignorant un — le pire des comptes rendus, puisqu'il ferme la
+	 * question.
+	 *
+	 * Les deux commentaires qui décrivent ce défaut ne l'ont pas empêché. La
+	 * réponse doit donc être **dérivée du disque**, et non d'une liste tenue à la
+	 * main : tout dossier `anode-*` de `mu-plugins/` qui n'est pas dans la liste
+	 * est signalé, avec le geste à faire.
+	 *
+	 * Le modèle de contenu d'un site (`<slug>-contenu`) n'est pas concerné : il est
+	 * généré par site, il n'a pas de version publiée, et il n'a rien à faire dans
+	 * une liste commune.
+	 *
+	 * @param string $mu Chemin du dossier des mu-plugins.
+	 * @return list<string>
+	 */
+	private function hors_liste( string $mu ): array {
+		$dossiers = is_dir( $mu ) ? (array) glob( $mu . '/anode-*', GLOB_ONLYDIR ) : [];
+		$inconnus = [];
+
+		foreach ( $dossiers as $chemin ) {
+			$nom = basename( (string) $chemin );
+
+			/*
+			 * Le modèle de contenu porte le slug du site, et un slug peut commencer
+			 * par le nom de la marque : `anode-test-contenu` tomberait dans le filet.
+			 * Le commentaire ci-dessus l'exemptait, le code non — le défaut a été
+			 * mesuré dès la première exécution sur le pont voisin.
+			 */
+			if ( isset( self::COMPOSANTS[ $nom ] ) || 'anode-bridge' === $nom
+				|| str_ends_with( $nom, '-contenu' ) ) {
+				continue;
+			}
+
+			$inconnus[] = $nom;
+		}
+
+		return $inconnus;
 	}
 
 	/** @return list<array{id: string, ok: bool, detail: string}> */

@@ -55,7 +55,7 @@ final class Rest_Health {
 		 * jour-là, que personne ne complète quand un composant arrive.
 		 */
 		'anode-builder'      => [ 'symbole' => 'Anode\Builder\fonctions_actives', 'genre' => 'function' ],
-		'anode-animations'   => [ 'symbole' => 'Bricks_Animation_System', 'genre' => 'class' ],
+		'anode-animations'   => [ 'symbole' => 'Anode\\Animations\\Animations', 'genre' => 'class' ],
 	];
 
 	/**

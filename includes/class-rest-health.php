@@ -48,25 +48,25 @@ final class Rest_Health {
 		'anode-updater'      => [ 'symbole' => 'Anode\Updater\Updater', 'genre' => 'class' ],
 		/*
 		 * Le confort du builder manquait à cette liste, et le manque était symétrique
-		 * dans les deux blueprints. Conséquence : le composant pouvait être absent,
-		 * non chargé, ou servi sans ses ressources, et `wp_health` répondait « tous
-		 * les composants au vert ». C'est exactement le défaut que le commentaire des
-		 * quatre composants voisins décrit — une liste écrite pour ce qui existait ce
+		 * dans les deux blueprints. Le composant pouvait être absent, non chargé, ou
+		 * servi sans ses ressources, et le point de santé répondait « tous les
+		 * composants au vert ». C'est le défaut que le commentaire des quatre
+		 * composants ci-dessous décrit déjà — une liste écrite pour ce qui existait ce
 		 * jour-là, que personne ne complète quand un composant arrive.
 		 */
 		'anode-builder'      => [ 'symbole' => 'Anode\Builder\fonctions_actives', 'genre' => 'function' ],
-		/*
-		 * Et le manque s'est reproduit, une troisième fois, avec les animations :
-		 * le composant est arrivé dans le blueprint le 04/08/2026, personne n'a
-		 * complété cette liste, et `wp_health` répondait « tous les composants au
-		 * vert » sur un site qui n'en avait que huit sur neuf. Le commentaire
-		 * ci-dessus **décrivait** déjà le défaut — un commentaire ne l'empêche pas.
-		 *
-		 * C'est pourquoi `hors_liste()` existe désormais : la liste ne peut plus
-		 * être en retard sur le disque sans que la réponse le dise.
-		 */
-		'anode-animations'   => [ 'symbole' => 'Anode\Animations\Animations', 'genre' => 'class' ],
+		'anode-animations'   => [ 'symbole' => 'Bricks_Animation_System', 'genre' => 'class' ],
 	];
+
+	/**
+	 * Inventaires relevés une fois : la sonde les lit, la réponse les rend.
+	 *
+	 * @var list<array{file: string, name: string, version: ?string, active: bool}>|null
+	 */
+	private ?array $extensions = null;
+
+	/** @var list<string>|null */
+	private ?array $themes = null;
 
 	public function register_routes(): void {
 		register_rest_route(
@@ -144,7 +144,7 @@ final class Rest_Health {
 		 * Le pont lui-même : il répond, donc il tourne.
 		 *
 		 * Son entrée est ajoutée **après** la boucle ci-dessus — donc après la
-		 * collecte des problèmes. Conséquence mesurée le 04/08/2026 : un site
+		 * collecte des problèmes. Conséquence mesurée le 04/08/2026 : le blueprint
 		 * répondait « ok: true, problems: 0 » avec la sonde `site-favicon` du pont
 		 * au rouge. Toutes les sondes du pont étaient muettes depuis qu'elles
 		 * existent, et le point de santé annonçait le contraire de ce qu'il avait
@@ -191,10 +191,11 @@ final class Rest_Health {
 		}
 
 		/*
-		 * La liste peut être en retard sur le disque — c'est arrivé trois fois. On
-		 * le dit avant de conclure quoi que ce soit sur la santé du site : un
-		 * composant hors liste n'est ni sondé, ni versionné dans la réponse, et son
-		 * absence de la liste se lit exactement comme sa conformité.
+		 * La liste peut être en retard sur le disque — c'est arrivé deux fois ici, et
+		 * une troisième sur le pont voisin. On le dit avant de conclure quoi que ce
+		 * soit sur la santé du site : un composant hors liste n'est ni sondé, ni
+		 * versionné dans la réponse, et son absence de la liste se lit exactement
+		 * comme sa conformité.
 		 */
 		$inconnus = $this->hors_liste( $mu );
 
@@ -239,6 +240,26 @@ final class Rest_Health {
 				'components'  => $composants,
 				'unlisted'    => $inconnus,
 				'shadowed'    => $doublons,
+				/*
+				 * L'inventaire, et pas seulement le verdict des sondes : c'était
+				 * le trou nommé par /audit-wp — « le pont n'expose pas
+				 * d'inventaire des extensions », donc un point qu'on déclarait
+				 * non vérifié sur chaque site en ligne.
+				 *
+				 * Les versions restent à l'administration, comme les fatales :
+				 * la route est ouverte à un compte qui n'a que `edit_pages`, et
+				 * la version d'une extension tierce est de la reconnaissance.
+				 * Les sondes, elles, répondent à tout le monde.
+				 *
+				 * `null` et non `[]` : « je ne le dis pas » n'est pas « il n'y
+				 * en a aucune ». Un tableau vide se lirait comme un site propre.
+				 */
+				'plugins'     => Security::can_manage() ? $this->inventaire_extensions() : null,
+				'themes'      => [
+					'installed' => $this->inventaire_themes(),
+					'active'    => get_stylesheet(),
+					'parent'    => get_template(),
+				],
 				'fatals'      => $journal,
 				'problems'    => $problemes,
 			]
@@ -292,14 +313,102 @@ final class Rest_Health {
 			case 'anode-builder':
 				return $this->sondes_builder();
 
-			case 'anode-animations':
-				return $this->sondes_animations();
-
 			case 'anode-bridge':
 				return $this->sondes_bridge();
+
+			case 'anode-animations':
+				return $this->sondes_animations();
 		}
 
 		return [];
+	}
+
+	/**
+	 * Les animations : chargées ne suffit pas, il faut qu'elles soient accrochées.
+	 *
+	 * Le composant n'expose ni option, ni table, ni route : tout son effet passe
+	 * par deux accroches posées au constructeur. Une classe instanciée dont les
+	 * accroches ont été retirées — `remove_action` d'un thème, ordre de chargement
+	 * — laisse le symbole en mémoire et la page **sans une ligne de CSS**.
+	 *
+	 * Ce cas ne se voit sur aucune capture : sans le CSS, `[animate]` n'est plus
+	 * masqué, donc tout s'affiche — à l'état final, sans animation. Le site paraît
+	 * « sans effets », ce qu'on met sur le compte d'un choix de conception.
+	 *
+	 * C'était l'un des deux composants à **zéro sonde** : chargé, et rien de plus.
+	 *
+	 * @return list<array{id: string, ok: bool, detail: string}>
+	 */
+	private function sondes_animations(): array {
+		/*
+		 * Les accroches sont posées sur une **instance**, pas sur la classe : on ne
+		 * peut donc pas les retrouver par leur rappel. On demande à WordPress si
+		 * quelque chose est accroché à la priorité 99, qui est celle du composant.
+		 */
+		$accrochee = static function ( string $accroche ): bool {
+			global $wp_filter;
+
+			return isset( $wp_filter[ $accroche ] ) && ! empty( $wp_filter[ $accroche ]->callbacks[99] );
+		};
+
+		$css = $accrochee( 'wp_head' );
+		$js  = $accrochee( 'wp_footer' );
+
+		return [
+			$this->sonde(
+				'animations-accroches',
+				$css && $js,
+				sprintf(
+					'accroche(s) absente(s) à la priorité 99 : %s. Le symbole est en mémoire mais rien n’est injecté — les éléments animés s’affichent à l’état final, sans animation, et rien ne le signale.',
+					implode( ', ', array_filter( [ $css ? null : 'wp_head', $js ? null : 'wp_footer' ] ) )
+				),
+				'CSS et moteur accrochés à la page'
+			),
+		];
+	}
+
+	/**
+	 * Un composant sur le disque que cette classe ne connaît pas.
+	 *
+	 * Deux fois de suite, la liste `COMPOSANTS` a été en retard sur le blueprint :
+	 * les quatre composants propres à celui-ci, puis le confort du builder. Chaque
+	 * fois, la réponse annonçait « tous les composants au vert » en en ignorant un
+	 * — le pire des comptes rendus, puisqu'il ferme la question.
+	 *
+	 * Les commentaires qui décrivent ce défaut ne l'ont pas empêché : il s'est
+	 * reproduit une troisième fois sur le pont voisin, avec les animations. La
+	 * réponse doit donc être **dérivée du disque**, et non d'une liste tenue à la
+	 * main.
+	 *
+	 * Le modèle de contenu d'un site (`<slug>-contenu`) n'est pas concerné : il est
+	 * généré par site, il n'a pas de version publiée, et il n'a rien à faire dans
+	 * une liste commune.
+	 *
+	 * @param string $mu Chemin du dossier des mu-plugins.
+	 * @return list<string>
+	 */
+	private function hors_liste( string $mu ): array {
+		$dossiers = is_dir( $mu ) ? (array) glob( $mu . '/anode-*', GLOB_ONLYDIR ) : [];
+		$inconnus = [];
+
+		foreach ( $dossiers as $chemin ) {
+			$nom = basename( (string) $chemin );
+
+			/*
+			 * Le modèle de contenu porte le slug du site, et un slug peut commencer
+			 * par le nom de la marque : `anode-studio-contenu` tombait donc dans le
+			 * filet. Le commentaire ci-dessus l'exemptait, le code non — mesuré dès
+			 * la première exécution, sur le site de la marque elle-même.
+			 */
+			if ( isset( self::COMPOSANTS[ $nom ] ) || 'anode-bridge' === $nom
+				|| str_ends_with( $nom, '-contenu' ) ) {
+				continue;
+			}
+
+			$inconnus[] = $nom;
+		}
+
+		return $inconnus;
 	}
 
 	/** @return list<array{id: string, ok: bool, detail: string}> */
@@ -348,9 +457,9 @@ final class Rest_Health {
 	/**
 	 * Une définition porte-t-elle un réglage que le moteur ne lit pas ?
 	 *
-	 * Le moteur ignore en silence toute clé inconnue. Mesuré sur Niort Tech :
-	 * `contact.json` et `reservation.json` portaient encore
-	 * `"notify": "contact@niort-tech.fr"`, restée là quand l'envoi de courriel
+	 * Le moteur ignore en silence toute clé inconnue. Mesuré sur un site client
+	 * en préproduction : `contact.json` et `reservation.json` portaient encore
+	 * `"notify": "contact@exemple.fr"`, restée là quand l'envoi de courriel
 	 * est parti avec le stockage des demandes. Les fichiers annonçaient donc un
 	 * destinataire que plus une ligne ne lisait — et la sonde voisine, qui ne
 	 * regarde que la présence d'un relais, n'avait rien à en dire.
@@ -395,6 +504,7 @@ final class Rest_Health {
 			''
 		);
 	}
+
 
 	/**
 	 * Chaque formulaire a-t-il un relais où envoyer ?
@@ -486,16 +596,11 @@ final class Rest_Health {
 		/*
 		 * Un blueprint n'a pas de relais, et n'en aura jamais.
 		 *
-		 * La distinction manquait : le contrôle raisonnait par environnement, donc
-		 * il traitait un blueprint comme une préproduction de client — « à
-		 * renseigner avant la mise en ligne ». Or on ne crée pas un scénario n8n
-		 * pour un blueprint : ses formulaires sont là pour être copiés, pas pour
-		 * recevoir. Insister revient à demander une chose qui n'arrivera pas, et
-		 * une exigence qu'on sait ne pas devoir satisfaire est une exigence qu'on
-		 * cesse de lire — y compris sur les sites où elle compte.
-		 *
-		 * Un vrai site, lui, garde l'exigence entière : informative tant qu'il
-		 * n'est pas en production, bloquante ensuite.
+		 * La distinction manquait : le contrôle raisonnait par environnement, donc il
+		 * traitait un blueprint comme une préproduction de client. Or on ne crée pas un
+		 * scénario n8n pour un blueprint : ses formulaires sont là pour être copiés, pas
+		 * pour recevoir. Une exigence qu'on sait ne pas devoir satisfaire est une
+		 * exigence qu'on cesse de lire — y compris sur les sites où elle compte.
 		 */
 		if ( defined( 'ANODE_BLUEPRINT' ) && constant( 'ANODE_BLUEPRINT' ) ) {
 			return $this->sonde(
@@ -510,9 +615,9 @@ final class Rest_Health {
 		}
 
 		/*
-		 * Hors production, l'absence de relais reste attendue : un site en
-		 * construction n'a pas encore d'adresse où envoyer, et rendre la santé
-		 * rouge en permanence ferait une alerte qu'on ne lit plus.
+		 * Hors production, l'absence de relais reste attendue : un blueprint neuf
+		 * n'a pas d'adresse où envoyer, et rendre la santé rouge en permanence
+		 * ferait une alerte qu'on ne lit plus.
 		 *
 		 * Mais le détail ne dit plus « à renseigner avant la mise en ligne » : ces
 		 * formulaires **refusent déjà** les envois, sur tous les environnements,
@@ -760,6 +865,8 @@ final class Rest_Health {
 		];
 	}
 
+
+
 	/** @return list<array{id: string, ok: bool, detail: string}> */
 	private function sondes_redirections(): array {
 		$table = \Anode\Redirections\table_path();
@@ -794,20 +901,19 @@ final class Rest_Health {
 	/**
 	 * Le confort du builder.
 	 *
-	 * Deux choses peuvent le rendre inerte sans rien casser d'apparent, et aucune
-	 * ne se voit dans le builder tant qu'on ne cherche pas : ses **ressources**
-	 * absentes — le composant est alors chargé, ses réglages sont lus, et le
-	 * navigateur reçoit deux URL en 404 —, et **toutes ses fonctions éteintes** par
-	 * le filtre, auquel cas il ne sert rien du tout et c'est peut-être voulu.
+	 * Deux choses peuvent le rendre inerte sans rien casser d'apparent : ses
+	 * **ressources** absentes — le composant est alors chargé, ses réglages sont
+	 * lus, et le navigateur reçoit deux URL en 404 —, et **toutes ses fonctions
+	 * éteintes** par le filtre, auquel cas il ne sert rien du tout et c'est
+	 * peut-être voulu.
 	 *
 	 * On ne sonde pas ce qu'il fait dans le builder : cela demande un vrai
-	 * navigateur, et c'est le rôle de `bin/test-builder-interactions.mjs`. Ici, on
-	 * répond à « le composant peut-il seulement agir ? ».
+	 * navigateur, et c'est le rôle de `bin/test-builder-interactions.mjs`.
 	 *
 	 * @return list<array{id: string, ok: bool, detail: string}>
 	 */
 	private function sondes_builder(): array {
-		$actives = \Anode\Builder\fonctions_actives();
+		$actives  = \Anode\Builder\fonctions_actives();
 		$allumees = array_keys( array_filter( $actives ) );
 
 		$manquants = [];
@@ -845,84 +951,6 @@ final class Rest_Health {
 				'au moins une fonction active'
 			),
 		];
-	}
-
-	/**
-	 * Les animations : chargées ne suffit pas, il faut qu'elles soient accrochées.
-	 *
-	 * Le composant n'expose ni option, ni table, ni route : tout son effet passe
-	 * par deux accroches posées dans `boot()`. Un fichier chargé dont `boot()` n'a
-	 * jamais été appelé — inclusion sans amorçage, `remove_action` d'un thème —
-	 * laisse donc la classe en mémoire et la page **sans une ligne de CSS**.
-	 *
-	 * Et ce cas-là ne se voit sur aucune capture : sans le CSS, `[animate]` n'est
-	 * plus masqué, donc tout s'affiche — normalement, à l'état final, sans
-	 * animation. Le site paraît juste « sans effets », ce qu'on met sur le compte
-	 * d'un choix de conception.
-	 *
-	 * @return list<array{id: string, ok: bool, detail: string}>
-	 */
-	private function sondes_animations(): array {
-		$symbole = [ 'Anode\Animations\Animations', 'inject_css' ];
-		$css     = has_action( 'wp_head', $symbole );
-		$js      = has_action( 'wp_footer', [ 'Anode\Animations\Animations', 'inject_js' ] );
-
-		return [
-			$this->sonde(
-				'animations-accroches',
-				false !== $css && false !== $js,
-				sprintf(
-					'accroche(s) absente(s) : %s. La classe est en mémoire mais rien n’est injecté — les éléments animés s’affichent à l’état final, sans animation, et rien ne le signale.',
-					implode( ', ', array_filter( [ false === $css ? 'wp_head' : null, false === $js ? 'wp_footer' : null ] ) )
-				),
-				'CSS et moteur accrochés à la page'
-			),
-		];
-	}
-
-	/**
-	 * Un composant sur le disque que cette classe ne connaît pas.
-	 *
-	 * Trois fois de suite, la liste `COMPOSANTS` a été en retard sur le blueprint :
-	 * les quatre composants propres à un blueprint, puis le confort du builder,
-	 * puis les animations. Chaque fois, la réponse annonçait « tous les composants
-	 * au vert » en en ignorant un — le pire des comptes rendus, puisqu'il ferme la
-	 * question.
-	 *
-	 * Les deux commentaires qui décrivent ce défaut ne l'ont pas empêché. La
-	 * réponse doit donc être **dérivée du disque**, et non d'une liste tenue à la
-	 * main : tout dossier `anode-*` de `mu-plugins/` qui n'est pas dans la liste
-	 * est signalé, avec le geste à faire.
-	 *
-	 * Le modèle de contenu d'un site (`<slug>-contenu`) n'est pas concerné : il est
-	 * généré par site, il n'a pas de version publiée, et il n'a rien à faire dans
-	 * une liste commune.
-	 *
-	 * @param string $mu Chemin du dossier des mu-plugins.
-	 * @return list<string>
-	 */
-	private function hors_liste( string $mu ): array {
-		$dossiers = is_dir( $mu ) ? (array) glob( $mu . '/anode-*', GLOB_ONLYDIR ) : [];
-		$inconnus = [];
-
-		foreach ( $dossiers as $chemin ) {
-			$nom = basename( (string) $chemin );
-
-			/*
-			 * Le modèle de contenu porte le slug du site, et un slug peut commencer
-			 * par le nom de la marque : `anode-test-contenu` tomberait dans le filet.
-			 * Le commentaire ci-dessus l'exemptait, le code non — le défaut a été
-			 * mesuré dès la première exécution sur le pont voisin.
-			 */
-			if ( isset( self::COMPOSANTS[ $nom ] ) || 'anode-bridge' === $nom
-				|| str_ends_with( $nom, '-contenu' ) ) {
-				continue;
-			}
-
-			$inconnus[] = $nom;
-		}
-
-		return $inconnus;
 	}
 
 	/** @return list<array{id: string, ok: bool, detail: string}> */
@@ -1134,7 +1162,271 @@ final class Rest_Health {
 				'Bricks est introuvable : aucune mise en page ne peut être lue ni écrite.',
 				'Bricks accessible'
 			),
+			$this->sonde_extensions_tierces(),
+			$this->sonde_themes_superflus(),
+			$this->sonde_favicon(),
 		];
+	}
+
+	/**
+	 * Le site a-t-il un favicon ?
+	 *
+	 * Son absence ne se voit sur aucune capture, aucun audit fonctionnel, aucun
+	 * contrôle du dépôt : WordPress n'émet simplement **aucune** balise `icon`,
+	 * et le navigateur affiche son icône par défaut — une page blanche, ou
+	 * l'initiale du domaine. Rien n'est cassé, rien ne l'annonce.
+	 *
+	 * Mesuré le 02/08/2026 sur `preprod.agence-anode.fr` : `site_icon` à 0, et le
+	 * mot « favicon » absent de tout le dépôt — CLAUDE.md, docs, compétences.
+	 *
+	 * @return array{id: string, ok: bool, detail: string}
+	 */
+	private function sonde_favicon(): array {
+		$id = (int) get_option( 'site_icon' );
+
+		if ( ! $id || ! wp_attachment_is_image( $id ) ) {
+			return $this->sonde(
+				'site-favicon',
+				false,
+				'aucun favicon : WordPress n’émet aucune balise « icon », et l’onglet affiche l’icône par '
+					. 'défaut du navigateur. Téléverser un PNG carré d’au moins 512 px, puis '
+					. 'wp_update_settings { "site_icon": <id> }.',
+				''
+			);
+		}
+
+		/*
+		 * Le réglage ne suffit pas. WordPress ne fabrique les tailles dédiées
+		 * (32, 180, 192, 270) que dans l'assistant de recadrage : posé par
+		 * l'API, le média n'en a aucune, et les balises sortent avec un
+		 * `sizes="32x32"` qui pointe une image de 150 px. Ça marche, et c'est
+		 * faux — donc invisible.
+		 */
+		$tailles  = (array) ( wp_get_attachment_metadata( $id )['sizes'] ?? [] );
+		$absentes = array_diff( [ 'site_icon-32', 'site_icon-180', 'site_icon-192', 'site_icon-270' ], array_keys( $tailles ) );
+
+		if ( $absentes ) {
+			return $this->sonde(
+				'site-favicon',
+				false,
+				sprintf(
+					'favicon posé, mais sans ses tailles dédiées (%s) : les balises `icon` déclarent des '
+						. 'dimensions qu’elles ne servent pas. Régénérer avec WP_Site_Icon::additional_sizes '
+						. '— voir docs/seo.md.',
+					implode( ', ', $absentes )
+				),
+				''
+			);
+		}
+
+		return $this->sonde( 'site-favicon', true, '', sprintf( 'favicon posé (média %d), quatre tailles servies', $id ) );
+	}
+
+	/**
+	 * Reste-t-il une extension que le site n'a pas déclarée ?
+	 *
+	 * Le dépôt exige zéro extension tierce, et l'outil qui le vérifie
+	 * (`clean-plugins.mjs --check`) ne sait travailler que sur une installation
+	 * du poste : sur un site en ligne — c'est-à-dire sur tous — la règle n'était
+	 * vérifiée par rien. Elle se lisait, disait la doc, par `wp_site_info`.
+	 *
+	 * Or `wp_site_info` ne rend que les extensions **actives**. Mesuré le
+	 * 02/08/2026 sur `preprod.agence-anode.fr` : `plugins: []` et `wp_health` sans
+	 * un mot, pendant qu'Akismet et Hello Dolly dormaient dans `plugins/`. Une
+	 * extension inactive n'est pas inoffensive — c'est du code sur le disque, qui
+	 * suit ses propres mises à jour et porte ses propres failles, exactement
+	 * l'argument qui fait retirer les thèmes par défaut.
+	 *
+	 * @return array{id: string, ok: bool, detail: string}
+	 */
+	private function sonde_extensions_tierces(): array {
+		$inventaire = $this->inventaire_extensions();
+		$fautives   = self::extensions_indesirables( $inventaire, $this->extensions_declarees() );
+
+		if ( ! $fautives ) {
+			return $this->sonde(
+				'extensions-tierces',
+				true,
+				'',
+				sprintf( 'aucune extension tierce dans plugins/ (%d présente(s))', count( $inventaire ) )
+			);
+		}
+
+		$noms = array_map(
+			/*
+			 * Le slug, pas la version : la route est ouverte à un compte qui n'a
+			 * que `edit_pages`, et la version d'une extension tierce est de la
+			 * reconnaissance. Le slug suffit à agir — c'est ce que prend
+			 * `wp plugin delete`.
+			 */
+			static function ( array $extension ): string {
+				return sprintf( '%s (%s)', $extension['slug'], $extension['active'] ? 'active' : 'inactive' );
+			},
+			$fautives
+		);
+
+		return $this->sonde(
+			'extensions-tierces',
+			false,
+			sprintf(
+				'extension(s) non déclarées dans plugins/ : %s. Aucune extension tierce sur un site livré, '
+					. 'active ou non : la retirer (wp plugin delete <slug>), ou la déclarer — site.json '
+					. '("plugins": {"keep": […]}) puis ANODE_PLUGINS_AUTORISES dans wp-config.',
+				implode( ' ; ', $noms )
+			),
+			''
+		);
+	}
+
+	/**
+	 * Deux thèmes, et seulement deux.
+	 *
+	 * Même raisonnement, et même angle mort : `wp_site_info` ne rend que le thème
+	 * **actif** et son parent. Un `twentytwentyfour` ou le `bricks-child` livré
+	 * avec Bricks pouvait donc rester sur le disque sans qu'aucun outil MCP ne le
+	 * dise — le contrôle se faisait en SSH à la mise en ligne, ou jamais.
+	 *
+	 * @return array{id: string, ok: bool, detail: string}
+	 */
+	private function sonde_themes_superflus(): array {
+		$installes = $this->inventaire_themes();
+		$superflus = self::themes_superflus( $installes, get_stylesheet(), get_template() );
+
+		if ( ! $superflus ) {
+			return $this->sonde(
+				'themes-superflus',
+				true,
+				'',
+				sprintf( 'deux thèmes et deux seulement : %s', implode( ', ', $installes ) )
+			);
+		}
+
+		return $this->sonde(
+			'themes-superflus',
+			false,
+			sprintf(
+				'thème(s) en trop sur le disque : %s. Deux thèmes et deux seulement — Bricks et l’enfant '
+					. 'du site : wp theme delete <nom>.',
+				implode( ', ', $superflus )
+			),
+			''
+		);
+	}
+
+	/**
+	 * Ce que le site déclare accepter dans `plugins/`.
+	 *
+	 * Les composants maison y figurent parce qu'une copie de l'un d'eux dans
+	 * `plugins/` est déjà nommée par `shadowed`, avec la bonne explication : elle
+	 * est **inerte**, pas tierce. Deux rouges pour un seul fait feraient chercher
+	 * deux causes.
+	 *
+	 * @return list<string>
+	 */
+	private function extensions_declarees(): array {
+		$declarees = defined( 'ANODE_PLUGINS_AUTORISES' )
+			? array_filter( array_map( 'trim', explode( ',', (string) ANODE_PLUGINS_AUTORISES ) ) )
+			: [];
+
+		return array_values( array_merge( $declarees, array_keys( self::COMPOSANTS ), [ 'anode-bridge' ] ) );
+	}
+
+	/**
+	 * Le slug d'une extension — dossier, ou fichier unique.
+	 *
+	 * Hello Dolly est un `hello.php` posé à la racine de `plugins/` : tout ce qui
+	 * ne regarde que les sous-dossiers ne le voit pas. C'est la moitié du défaut
+	 * mesuré le 02/08/2026, l'autre étant qu'il était inactif.
+	 */
+	public static function slug_extension( string $fichier ): string {
+		return str_contains( $fichier, '/' )
+			? (string) strtok( $fichier, '/' )
+			: basename( $fichier, '.php' );
+	}
+
+	/**
+	 * Les extensions présentes que le site n'a pas déclarées.
+	 *
+	 * Pure : c'est la décision, elle se teste sans WordPress.
+	 *
+	 * @param list<array{file: string, name: string, active: bool}> $inventaire
+	 * @param list<string>                                          $declarees
+	 * @return list<array{file: string, name: string, active: bool, slug: string}>
+	 */
+	public static function extensions_indesirables( array $inventaire, array $declarees ): array {
+		$fautives = [];
+
+		foreach ( $inventaire as $extension ) {
+			$slug = self::slug_extension( (string) $extension['file'] );
+
+			if ( in_array( $slug, $declarees, true ) ) {
+				continue;
+			}
+
+			$fautives[] = array_merge( $extension, [ 'slug' => $slug ] );
+		}
+
+		return $fautives;
+	}
+
+	/**
+	 * Les thèmes installés en plus de l'enfant du site et de son parent.
+	 *
+	 * `$parent` vaut `$actif` sur un thème sans parent : le filtre le supporte
+	 * sans cas particulier.
+	 *
+	 * @param list<string> $installes
+	 * @return list<string>
+	 */
+	public static function themes_superflus( array $installes, string $actif, string $parent ): array {
+		return array_values( array_diff( $installes, array_filter( [ $actif, $parent ] ) ) );
+	}
+
+	/**
+	 * Tout ce que `plugins/` contient, actif ou non.
+	 *
+	 * `get_plugins()` voit aussi bien un sous-dossier qu'un `hello.php` à la
+	 * racine — c'est la raison de ne pas lister le dossier soi-même.
+	 *
+	 * @return list<array{file: string, name: string, version: ?string, active: bool}>
+	 */
+	private function inventaire_extensions(): array {
+		if ( null !== $this->extensions ) {
+			return $this->extensions;
+		}
+
+		if ( ! function_exists( 'get_plugins' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+
+		$actives = (array) get_option( 'active_plugins', [] );
+		$liste   = [];
+
+		foreach ( get_plugins() as $fichier => $entete ) {
+			$liste[] = [
+				'file'    => (string) $fichier,
+				'name'    => (string) ( $entete['Name'] ?? $fichier ),
+				'version' => ( (string) ( $entete['Version'] ?? '' ) ) ?: null,
+				'active'  => in_array( (string) $fichier, $actives, true ),
+			];
+		}
+
+		$this->extensions = $liste;
+
+		return $liste;
+	}
+
+	/**
+	 * Les dossiers de `themes/`, actif compris.
+	 *
+	 * @return list<string>
+	 */
+	private function inventaire_themes(): array {
+		if ( null === $this->themes ) {
+			$this->themes = array_values( array_keys( wp_get_themes() ) );
+		}
+
+		return $this->themes;
 	}
 
 	/**

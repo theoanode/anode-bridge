@@ -1587,9 +1587,9 @@ final class Rest_Bricks {
 	/**
 	 * Décide les conditions d'affichage à écrire pour un template.
 	 *
-	 * Ce que cette méthode empêche est arrivé, mesuré le 31/07/2026 sur un site
-	 * en ligne : mettre à jour le gabarit du template « 404 » sans en
-	 * repasser les conditions écrasait `templateConditions` par « any », et
+	 * Ce que cette méthode empêche est arrivé, mesuré le 31/07/2026 sur
+	 * blueprint.agence-anode.fr : mettre à jour le gabarit du template « 404 » sans
+	 * repasser ses conditions écrasait `templateConditions` par « any », et
 	 * Bricks servait alors la page d'erreur **à la place de tout le site** —
 	 * accueil comprise, en HTTP 200. L'appel avait pourtant répondu « mis à jour
 	 * avec 10 élément(s) », sans un mot sur la condition remplacée.

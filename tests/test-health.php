@@ -136,6 +136,89 @@ test( 'une date dans le futur ne déclenche rien', function () use ( $maintenant
 	assert_null( Rest_Health::verification_perimee( '2026-08-05T06:00:00+00:00', $maintenant ), 'date future' );
 } );
 
+/* --- Extensions présentes dans plugins/ ------------------------------ */
+
+echo "\nExtensions tierces\n";
+
+/** Ce que `get_plugins()` rend sur une installation WordPress neuve. */
+$neuve = [
+	[ 'file' => 'akismet/akismet.php', 'name' => 'Akismet Anti-spam', 'active' => false ],
+	[ 'file' => 'hello.php', 'name' => 'Hello Dolly', 'active' => false ],
+];
+
+test( 'Akismet et Hello Dolly sont signalés, inactifs compris', function () use ( $neuve ): void {
+	// Le défaut mesuré le 02/08/2026 : les deux dormaient dans plugins/, et
+	// `wp_site_info` rendait « plugins: [] » — il ne liste que les actives.
+	$fautives = Rest_Health::extensions_indesirables( $neuve, [] );
+
+	assert_true( 2 === count( $fautives ), 'les deux doivent être signalées — obtenu : ' . count( $fautives ) );
+	assert_true( 'akismet' === $fautives[0]['slug'], 'slug attendu akismet : ' . $fautives[0]['slug'] );
+} );
+
+test( 'un fichier unique à la racine est vu comme les autres', function (): void {
+	// Hello Dolly n'a pas de dossier. Tout ce qui ne lit que les sous-dossiers de
+	// plugins/ ne le voit pas — c'est la moitié du défaut.
+	assert_true( 'hello' === Rest_Health::slug_extension( 'hello.php' ), 'hello.php doit rendre « hello »' );
+	assert_true( 'akismet' === Rest_Health::slug_extension( 'akismet/akismet.php' ), 'un dossier rend son nom' );
+} );
+
+test( 'une extension déclarée ne fait pas rougir la sonde', function () use ( $neuve ): void {
+	$fautives = Rest_Health::extensions_indesirables( $neuve, [ 'akismet' ] );
+
+	assert_true( 1 === count( $fautives ), 'Akismet déclarée devait passer' );
+	assert_true( 'hello' === $fautives[0]['slug'], 'Hello Dolly devait rester signalée' );
+} );
+
+test( 'les extensions de l’hébergeur sont signalées', function (): void {
+	$fautives = Rest_Health::extensions_indesirables(
+		[ [ 'file' => 'hostinger-auto-updates/plugin.php', 'name' => 'Hostinger Tools', 'active' => true ] ],
+		[]
+	);
+
+	assert_true( 1 === count( $fautives ), 'une extension hostinger-* doit être signalée' );
+	assert_true( 'hostinger-auto-updates' === $fautives[0]['slug'], 'slug Hostinger attendu' );
+} );
+
+test( 'une extension tierce est signalée quel que soit son nom', function (): void {
+	$fautives = Rest_Health::extensions_indesirables(
+		[ [ 'file' => 'mon-hostinger-truc/plugin.php', 'name' => 'Truc', 'active' => false ] ],
+		[]
+	);
+
+	assert_true( 1 === count( $fautives ), 'la tolérance porte sur le préfixe, pas sur le mot' );
+} );
+
+test( 'un site propre ne signale rien', function (): void {
+	assert_true( [] === Rest_Health::extensions_indesirables( [], [] ), 'plugins/ vide' );
+} );
+
+/* --- Thèmes installés ------------------------------------------------ */
+
+echo "\nThèmes superflus\n";
+
+test( 'le parent et l’enfant passent, le reste est signalé', function (): void {
+	$superflus = Rest_Health::themes_superflus(
+		[ 'bricks', 'anode-child', 'bricks-child', 'twentytwentyfour' ],
+		'anode-child',
+		'bricks'
+	);
+
+	assert_true(
+		[ 'bricks-child', 'twentytwentyfour' ] === $superflus,
+		'attendu bricks-child et twentytwentyfour — obtenu : ' . implode( ', ', $superflus )
+	);
+} );
+
+test( 'deux thèmes et deux seulement ne signalent rien', function (): void {
+	assert_true( [] === Rest_Health::themes_superflus( [ 'bricks', 'anode-child' ], 'anode-child', 'bricks' ), 'site conforme' );
+} );
+
+test( 'un thème sans parent ne se signale pas lui-même', function (): void {
+	// `get_template()` vaut `get_stylesheet()` hors thème enfant : sans ce cas,
+	// le thème actif figurerait dans sa propre liste de superflus.
+	assert_true( [] === Rest_Health::themes_superflus( [ 'bricks' ], 'bricks', 'bricks' ), 'thème unique' );
+} );
+
 echo "\n{$passed} test(s) réussi(s), {$failed} échec(s).\n\n";
 
 exit( $failed ? 1 : 0 );

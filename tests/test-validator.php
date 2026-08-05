@@ -877,11 +877,11 @@ echo "\nConditions d’affichage d’un template\n";
 /**
  * Ces cas sont relevés, pas imaginés.
  *
- * Le 31/07/2026, poser le gabarit dans le template « 404 » d'un site en ligne
- * sans en repasser les conditions a remplacé `templateConditions` par « any ».
- * Bricks a alors servi la page d'erreur à la place de **tout** le site —
- * accueil comprise, en HTTP 200 — et l'appel avait répondu « mis à jour avec
- * 10 élément(s) ».
+ * Le 31/07/2026, poser le gabarit dans le template « 404 » de
+ * blueprint.agence-anode.fr sans en repasser les conditions a remplacé
+ * `templateConditions` par « any ». Bricks a alors servi la page d'erreur à la
+ * place de **tout** le site — accueil comprise, en HTTP 200 — et l'appel avait
+ * répondu « mis à jour avec 10 élément(s) ».
  */
 $conditions = new ReflectionMethod( \Anode\Bridge\Rest_Bricks::class, 'conditions_du_template' );
 
@@ -1209,6 +1209,84 @@ test(
 		);
 	}
 );
+
+/* --- Le canevas : bornes et libellés --------------------------------- */
+
+test( 'une dimension fixe reçoit son minimum et son maximum', function (): void {
+	// Sans bornes, le canevas redimensionne l'élément : 40 px rendus à 90.
+	// La valeur fautive n'est écrite nulle part, elle est calculée.
+	$result = Validator::global_classes(
+		[ [ 'name' => 'c-fait__icone', 'settings' => [ '_width' => '40px', '_height' => '40px' ] ] ]
+	);
+
+	$s = $result[0]['settings'];
+
+	assert_true( '40px' === ( $s['_widthMin'] ?? null ), 'min-width absent' );
+	assert_true( '40px' === ( $s['_widthMax'] ?? null ), 'max-width absent' );
+	assert_true( '40px' === ( $s['_heightMin'] ?? null ), 'min-height absent' );
+	assert_true( '40px' === ( $s['_heightMax'] ?? null ), 'max-height absent' );
+} );
+
+test( 'une dimension fluide n’est jamais bornée', function (): void {
+	// La figer casserait le conteneur sur le front, là où le visiteur le voit.
+	// Sur un site du parc, 32 dimensions sur 61 étaient dans ce cas.
+	foreach ( [ '100%', 'auto', 'max-content', 'fit-content', 'calc(100% - 20px)' ] as $valeur ) {
+		$result = Validator::global_classes(
+			[ [ 'name' => 'l-grille', 'settings' => [ '_width' => $valeur ] ] ]
+		);
+
+		$s = $result[0]['settings'];
+
+		assert_true(
+			! isset( $s['_widthMin'] ) && ! isset( $s['_widthMax'] ),
+			"« {$valeur} » a été bornée — le conteneur casse sur le front"
+		);
+	}
+} );
+
+test( 'une borne déjà posée n’est pas écrasée', function (): void {
+	// Un minimum différent de la largeur est une intention, pas un oubli.
+	$result = Validator::global_classes(
+		[ [ 'name' => 'c-carte', 'settings' => [ '_width' => '300px', '_widthMin' => '200px' ] ] ]
+	);
+
+	assert_true( '200px' === $result[0]['settings']['_widthMin'], 'le minimum choisi a été écrasé' );
+	assert_true( '300px' === $result[0]['settings']['_widthMax'], 'le maximum n’a pas été posé' );
+} );
+
+test( 'une dimension bornée à un point de rupture garde son suffixe', function (): void {
+	$result = Validator::global_classes(
+		[ [ 'name' => 'c-hero__note', 'settings' => [ '_width:mobile_portrait' => '280px' ] ] ]
+	);
+
+	$s = $result[0]['settings'];
+
+	assert_true( '280px' === ( $s['_widthMin:mobile_portrait'] ?? null ), 'borne posée hors du point de rupture' );
+	assert_true( ! isset( $s['_widthMin'] ), 'une borne de base a été posée par erreur' );
+} );
+
+test( 'un bouton sans libellé reçoit une espace', function (): void {
+	// Sinon Bricks affiche « Je suis un bouton » dans le canevas, par-dessus
+	// son voisinage. Le mot ne sort jamais sur le front : invisible aux captures.
+	foreach ( [ '', '   ', null ] as $vide ) {
+		$reglages = null === $vide ? [] : [ 'text' => $vide ];
+		$result   = Validator::elements(
+			[ [ 'id' => 'abc123', 'name' => 'button', 'parent' => 0, 'children' => [], 'settings' => $reglages ] ]
+		);
+
+		assert_true( is_array( $result ), 'élément refusé' );
+		assert_true( ' ' === $result[0]['settings']['text'], 'le remplissage de Bricks n’est pas écarté' );
+	}
+} );
+
+test( 'un bouton qui a un libellé le garde', function (): void {
+	$result = Validator::elements(
+		[ [ 'id' => 'abc123', 'name' => 'button', 'parent' => 0, 'children' => [], 'settings' => [ 'text' => 'Candidater' ] ] ]
+	);
+
+	assert_true( 'Candidater' === $result[0]['settings']['text'], 'le libellé a été écrasé' );
+} );
+
 
 echo "\n{$passed} test(s) réussi(s), {$failed} échec(s).\n";
 

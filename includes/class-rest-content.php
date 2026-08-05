@@ -39,6 +39,19 @@ final class Rest_Content {
 		'time_format'     => 'string',
 		'start_of_week'   => 'integer',
 
+		/*
+		 * Le favicon — identifiant d'un média de la bibliothèque.
+		 *
+		 * Il manquait, et le manque ne se voyait pas : WordPress n'émet
+		 * simplement aucune balise `icon`, le navigateur affiche son icône par
+		 * défaut, et aucune capture ni aucun audit du dépôt ne le relève.
+		 * Mesuré le 02/08/2026 sur preprod.agence-anode.fr — `site_icon` à 0.
+		 *
+		 * Sans cette entrée, le poser demandait du SSH : c'est un réglage de
+		 * construction du site, il relève du MCP (§11).
+		 */
+		'site_icon'       => 'integer',
+
 		// Réglages SEO par défaut, posés par l'extension anode-seo. Ils
 		// s'appliquent à toutes les pages : les ouvrir ici évite d'avoir à
 		// répéter le même titre ou la même image sur chacune.

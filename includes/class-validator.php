@@ -175,6 +175,33 @@ final class Validator {
 			}
 		}
 
+		/*
+		 * Un bouton sans libellé affiche « Je suis un bouton » dans le canevas.
+		 *
+		 * C'est un texte de remplissage de Bricks, servi dès que `settings.text`
+		 * est vide ou absent. Il ne sort **jamais sur le front** : le site est donc
+		 * juste, et le builder montre trois mots qui ne sont pas dans la maquette,
+		 * par-dessus le voisinage. Mesuré sur un site du parc autour des flèches du
+		 * sélecteur d'années, dont le chevron est un masque CSS et le libellé
+		 * volontairement vide.
+		 *
+		 * Une **espace** suffit à l'écarter, et c'est pour cela qu'on la pose ici
+		 * plutôt que dans chaque arbre : un libellé vide est un cas normal — une
+		 * commande dont le dessin est en CSS —, et l'oublier une fois suffit à
+		 * salir le canevas d'une page entière.
+		 *
+		 * Elle ne dispense de rien : un bouton dont le seul contenu est une espace
+		 * n'a **aucun nom accessible**. Il lui faut un `aria-label`, que
+		 * `check-gabarit.mjs` et l'audit d'accessibilité continuent d'exiger.
+		 */
+		if ( 'button' === $name ) {
+			$libelle = $node['settings']['text'] ?? null;
+
+			if ( ! is_string( $libelle ) || '' === trim( $libelle ) ) {
+				$node['settings']['text'] = ' ';
+			}
+		}
+
 		return $node;
 	}
 
@@ -894,6 +921,72 @@ final class Validator {
 	 *
 	 * @return array<int, array<string, mixed>>|\WP_Error
 	 */
+	/**
+	 * Borne toute dimension fixe d'une classe : min et max, au même point de rupture.
+	 *
+	 * **Le défaut.** Une classe qui pose `width: 40px` sort juste sur le front et
+	 * **redimensionnée dans le canevas** du builder : mesuré sur un site du parc,
+	 * des pictogrammes de 40 px y faisaient 90, et des coches de 25 × 20 à
+	 * l'identique, sur une page entière. La valeur fautive n'est écrite nulle part
+	 * — elle est calculée : le canevas place ses éléments dans des conteneurs flex
+	 * qu'il étire lui-même, et `width` seule ne contraint pas un élément flex. Ce
+	 * sont `min-width` et `max-width` qui l'en empêchent.
+	 *
+	 * **Pourquoi ici.** Parce que ce n'est pas propre à un site : toute classe à
+	 * dimension fixe écrite par l'API est concernée, sur chaque projet, et le
+	 * défaut ne se voit sur aucune capture du front. Deux sites du parc étaient
+	 * propres uniquement parce qu'ils avaient été corrigés à la main, un par un.
+	 * Une règle qu'on doit se rappeler d'appliquer se reproduira ; posée par le
+	 * pont, elle ne peut plus être oubliée.
+	 *
+	 * **La seule nuance, et elle n'est pas facultative : jamais une dimension
+	 * fluide.** `100%`, `auto`, `max-content`, `fit-content` expriment une taille
+	 * qui suit le parent ; la figer casse le conteneur **sur le front**, là où le
+	 * visiteur le voit. Sur le site mesuré, 29 dimensions sur 61 étaient à borner
+	 * et 32 devaient rester intactes. Seule une valeur numérique suivie de `px`,
+	 * `rem` ou `em` est donc bornée.
+	 *
+	 * Une borne déjà posée n'est jamais écrasée : l'auteur qui a choisi un minimum
+	 * différent de sa largeur garde son intention.
+	 *
+	 * @param array<string, mixed> $settings Réglages de la classe.
+	 * @return array<string, mixed>
+	 */
+	private static function borner_dimensions( array $settings ): array {
+		$bornes = [
+			'_width'  => [ '_widthMin', '_widthMax' ],
+			'_height' => [ '_heightMin', '_heightMax' ],
+		];
+
+		foreach ( $settings as $key => $value ) {
+			if ( ! is_string( $key ) ) {
+				continue;
+			}
+
+			$parts   = explode( ':', $key, 2 );
+			$base    = $parts[0];
+			$rupture = $parts[1] ?? '';
+
+			if ( ! isset( $bornes[ $base ] ) || ! is_string( $value ) ) {
+				continue;
+			}
+
+			if ( ! preg_match( '/^-?\d+(?:\.\d+)?(?:px|rem|em)$/', trim( $value ) ) ) {
+				continue;
+			}
+
+			foreach ( $bornes[ $base ] as $borne ) {
+				$cle = '' === $rupture ? $borne : $borne . ':' . $rupture;
+
+				if ( ! array_key_exists( $cle, $settings ) ) {
+					$settings[ $cle ] = $value;
+				}
+			}
+		}
+
+		return $settings;
+	}
+
 	public static function global_classes( mixed $classes, bool $strict_bem = true ): array|\WP_Error {
 		if ( ! is_array( $classes ) ) {
 			return self::error( 'La liste des classes doit être un tableau.' );
@@ -965,6 +1058,8 @@ final class Validator {
 			if ( $verdict instanceof \WP_Error ) {
 				return $verdict;
 			}
+
+			$entry['settings'] = self::borner_dimensions( $entry['settings'] );
 
 			$clean[] = $entry;
 		}

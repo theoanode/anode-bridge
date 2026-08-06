@@ -48,7 +48,7 @@ final class Rest_Health {
 		'anode-updater'      => [ 'symbole' => 'Anode\Updater\Updater', 'genre' => 'class' ],
 		/*
 		 * Le confort du builder manquait à cette liste, et le manque était symétrique
-		 * dans les deux blueprints. Le composant pouvait être absent, non chargé, ou
+		 * dans le blueprint. Le composant pouvait être absent, non chargé, ou
 		 * servi sans ses ressources, et le point de santé répondait « tous les
 		 * composants au vert ». C'est le défaut que le commentaire des quatre
 		 * composants ci-dessous décrit déjà — une liste écrite pour ce qui existait ce
@@ -319,9 +319,82 @@ final class Rest_Health {
 
 			case 'anode-animations':
 				return $this->sondes_animations();
+
+			case 'anode-plan':
+				return $this->sondes_plan();
 		}
 
 		return [];
+	}
+
+	/**
+	 * Les pages d'atelier : servies en préproduction, muettes en production.
+	 *
+	 * Le composant était suivi par le canal de mise à jour et **sondé par
+	 * personne** : chargé, et rien de plus. Or ses deux façons de se tromper sont
+	 * silencieuses et opposées.
+	 *
+	 * Servir `/plan` en **production**, d'abord : ces pages exposent le plan du
+	 * site, ses formulaires, sa charte et ses composants à qui passe. Rien ne le
+	 * signale — la page s'affiche, joliment.
+	 *
+	 * Ne rien servir en **préproduction**, ensuite : l'atelier est là pour être
+	 * lu, et son absence ressemble à une page qui n'existe pas encore.
+	 *
+	 * On interroge donc l'environnement déclaré et la présence des routes, pas la
+	 * simple existence du composant.
+	 */
+	private function sondes_plan(): array {
+		/*
+		 * L'autorité est celle que le composant interroge lui-même :
+		 * `\Anode\Seo\Seo::production_declared()`. Une sonde qui appelle un
+		 * symbole inventé retombe sur son repli et mesure autre chose — sans un
+		 * mot, puisque `function_exists` rend simplement `false`.
+		 */
+		$production = is_callable( [ '\\Anode\\Seo\\Seo', 'production_declared' ] )
+			? (bool) \Anode\Seo\Seo::production_declared()
+			: 'production' === wp_get_environment_type();
+
+		/*
+		 * L'atelier ne passe pas par le REST : il pose des **règles de réécriture**
+		 * et une variable de requête. Chercher une route `/v1/plan` rendait donc
+		 * toujours « absent », y compris sur une préproduction où l'atelier
+		 * fonctionne — une sonde qui cherche un motif absent du système mesuré ne
+		 * rend pas « je ne sais pas », elle rend zéro.
+		 *
+		 * On interroge la variable de requête, que le composant déclare dès qu'il
+		 * s'estime actif, et les règles réellement enregistrées.
+		 */
+		$declare = in_array( 'anode_plan', (array) apply_filters( 'query_vars', [] ), true );
+
+		if ( ! $declare ) {
+			foreach ( array_keys( (array) get_option( 'rewrite_rules', [] ) ) as $regle ) {
+				if ( str_starts_with( (string) $regle, '^plan' ) ) {
+					$declare = true;
+
+					break;
+				}
+			}
+		}
+
+		/*
+		 * `sonde()` prend QUATRE arguments — id, verdict, message d'échec, message
+		 * de succès. Lui en passer trois lève une TypeError, et le pont rend 500
+		 * sur toute sa route de santé : une sonde ajoutée pour surveiller un
+		 * composant rendait muette la surveillance entière. Mesuré en déployant.
+		 */
+		return [
+			$this->sonde(
+				'plan-environnement',
+				$production ? ! $declare : $declare,
+				$production
+					? 'les pages d’atelier sont servies EN PRODUCTION — plan du site, formulaires et charte exposés au public'
+					: 'aucune route d’atelier déclarée alors que le site n’est pas en production',
+				$production
+					? 'muet en production, comme attendu'
+					: 'servies en préproduction, comme attendu'
+			),
+		];
 	}
 
 	/**
@@ -978,7 +1051,7 @@ final class Rest_Health {
 				'dernière vérification sans erreur'
 			),
 			$this->sonde_age( $etat ),
-			$this->sonde_jeton( $etat ),
+			$this->sonde_canal( $etat ),
 		];
 	}
 
@@ -994,14 +1067,14 @@ final class Rest_Health {
 	 * La dernière vérification est-elle trop vieille pour engager quoi que ce soit ?
 	 *
 	 * Les trois sondes de l'updater lisaient toutes le **même état stocké**, et
-	 * aucune ne regardait sa date. `sonde_jeton` en particulier annonce « canal
+	 * aucune ne regardait sa date. `sonde_canal` en particulier annonce « canal
 	 * ouvert — N composant(s) joignable(s) » à partir de `$etat['composants']`,
 	 * sans appeler GitHub : c'est le compte rendu de la dernière passe, quel que
 	 * soit son âge. Un site dont le cron a cessé de tourner garde donc son
 	 * dernier état — pas d'erreur, tous les dépôts joignables — et rend trois
 	 * voyants verts sur un canal qui ne reçoit plus rien.
 	 *
-	 * C'est exactement le défaut qui a fait naître `sonde_jeton` — un vert rendu
+	 * C'est exactement le défaut qui a fait naître `sonde_canal` — un vert rendu
 	 * à vide — mais repoussé d'un cran : corrigé pour « n'a jamais tourné », pas
 	 * pour « ne tourne plus ». Sur un parc qui exige désormais une signature, un
 	 * canal muet ne se contente pas de retarder une fonctionnalité : il retient
@@ -1032,7 +1105,7 @@ final class Rest_Health {
 	 * Séparée de la sonde pour être vérifiable sans WordPress — c'est la règle,
 	 * pas l'enveloppe, qui décide.
 	 *
-	 * Un état sans date n'est pas traité comme périmé : `sonde_jeton` couvre
+	 * Un état sans date n'est pas traité comme périmé : `sonde_canal` couvre
 	 * déjà « rien n'a jamais tourné », et rendre deux rouges pour un seul fait
 	 * ferait chercher deux causes.
 	 *
@@ -1068,68 +1141,121 @@ final class Rest_Health {
 	 * Le canal de mise à jour est-il réellement ouvert ?
 	 *
 	 * **Cette sonde vaut pour tous les sites, blueprints compris.** Contrairement
-	 * aux webhooks — qu'un blueprint n'aura jamais — le jeton est nécessaire
-	 * partout : sans lui, aucun site ne reçoit plus rien, et un blueprint qui ne se
-	 * met plus à jour est un blueprint qu'on clonera périmé.
+	 * aux webhooks — qu'un blueprint n'aura jamais — le canal est nécessaire
+	 * partout : un blueprint qui ne se met plus à jour est un blueprint qu'on
+	 * clonera périmé.
 	 *
 	 * Elle existe parce que la précédente réussissait à vide. `updater-derniere-verif`
 	 * lisait `! is_array( $etat ) || empty( $etat['erreur'] )` : un site qui n'a
 	 * **jamais** vérifié n'a pas d'état, la condition est donc vraie, et le vert
-	 * était rendu. Un site fraîchement mis en ligne, sans jeton, passait — c'est
-	 * précisément le moment où il fallait crier.
+	 * était rendu. Un site fraîchement mis en ligne passait — c'est précisément le
+	 * moment où il fallait crier.
 	 *
-	 * Trois états distincts, parce qu'ils appellent trois gestes différents : la
-	 * constante manque · elle est là mais un dépôt reste inatteignable — jeton
-	 * périmé, ou dépôt hors de sa portée · rien n'a jamais tourné.
+	 * ## Elle s'appelait `updater-jeton`, et ce nom est devenu faux
+	 *
+	 * Les dépôts de releases sont **publics** depuis le 06/08/2026. Le jeton
+	 * n'ouvre donc plus rien : il relève seulement le quota d'API, de soixante
+	 * appels par heure et par IP à cinq mille. Exiger sa présence reviendrait à
+	 * exiger un porteur d'autorisation à nous sur le disque de chaque client —
+	 * exactement ce que la décision de publier a retiré.
+	 *
+	 * Le nom a suivi la question. Garder `updater-jeton` serait pire qu'un nom
+	 * démodé : la sonde passerait **verte sans jeton**, et un lecteur en
+	 * conclurait qu'il est posé. Un nom qui trompe est un défaut, pas un détail.
+	 *
+	 * Deux états, là où il y en avait trois : rien n'a jamais tourné · un dépôt
+	 * reste muet. La constante absente n'est plus un état — c'est le cas normal.
 	 *
 	 * @param mixed $etat État de la dernière vérification.
 	 * @return array{id: string, ok: bool, detail: string}
 	 */
-	private function sonde_jeton( $etat ): array {
-		$pose = defined( 'ANODE_GITHUB_TOKEN' )
-			&& is_string( constant( 'ANODE_GITHUB_TOKEN' ) )
-			&& '' !== trim( (string) constant( 'ANODE_GITHUB_TOKEN' ) );
-
-		if ( ! $pose ) {
-			return $this->sonde(
-				'updater-jeton',
-				false,
-				'ANODE_GITHUB_TOKEN n’est pas défini dans wp-config.php : les dépôts sont privés, '
-					. 'donc **aucune mise à jour n’arrivera jamais** sur ce site — et rien d’autre ne le dira. '
-					. 'wp config set ANODE_GITHUB_TOKEN "$(cat ~/.config/anode-wp/jeton-theoanode)" --type=constant',
-				''
-			);
-		}
-
+	private function sonde_canal( $etat ): array {
 		$composants = is_array( $etat ) && is_array( $etat['composants'] ?? null ) ? $etat['composants'] : null;
 
 		if ( null === $composants ) {
 			return $this->sonde(
-				'updater-jeton',
+				'updater-canal',
 				false,
-				'le jeton est posé, mais aucune vérification n’a jamais abouti : on ne sait pas s’il fonctionne. '
-					. 'Lancer une passe et lire le résultat.',
+				'aucune vérification n’a jamais abouti : on ne sait pas si ce site reçoit '
+					. 'quoi que ce soit. Lancer une passe et lire le résultat — Outils → Mises à jour du site.',
 				''
 			);
 		}
 
-		$muets = [];
+		/*
+		 * Un composant **déclaré** mais absent de l'état n'a jamais été vérifié.
+		 *
+		 * La sonde comptait les lignes de l'état et s'arrêtait là : elle annonçait
+		 * « 8 composant(s) joignable(s) » et le vert, sur un canal qui en déclare
+		 * neuf. Le neuvième venait d'être ajouté à la liste, et aucune passe n'avait
+		 * tourné depuis — il était donc invisible, exactement au moment où il fallait
+		 * le signaler.
+		 *
+		 * Mesuré le 06/08/2026 sur un blueprint. C'est la même faute que « ✓ 0
+		 * surface(s) » : compter ce qu'on a trouvé, jamais ce qu'on attendait.
+		 */
+		$declares   = array_keys( \Anode\Updater\Updater::composants() );
+		$jamais_vus = array_values( array_diff( $declares, array_keys( $composants ) ) );
+
+		$muets  = [];
+		$quotas = [];
 
 		foreach ( $composants as $nom => $ligne ) {
-			if ( in_array( $ligne['etat'] ?? '', [ 'erreur', 'depot-absent' ], true ) ) {
+			$etat = (string) ( $ligne['etat'] ?? '' );
+
+			/*
+			 * Le quota épuisé n'est pas une panne : sans jeton, GitHub accorde soixante
+			 * appels par heure et par IP, et les sites d'un même hébergement la
+			 * partagent. La passe suivante repartira seule. Le confondre avec un dépôt
+			 * cassé enverrait chercher une faute là où il n'y a qu'une attente.
+			 *
+			 * C'est le planificateur qui le nomme — `etat: 'quota'`. Le lire ici dans
+			 * un `code` que rien n'écrivait aurait rendu zéro à chaque passe, et zéro
+			 * se lit comme une réponse.
+			 */
+			if ( 'quota' === $etat ) {
+				$quotas[] = (string) $nom;
+
+				continue;
+			}
+
+			if ( in_array( $etat, [ 'erreur', 'depot-absent' ], true ) ) {
 				$muets[] = (string) $nom;
 			}
 		}
 
+		$jeton = defined( 'ANODE_GITHUB_TOKEN' )
+			&& is_string( constant( 'ANODE_GITHUB_TOKEN' ) )
+			&& '' !== trim( (string) constant( 'ANODE_GITHUB_TOKEN' ) );
+
 		return $this->sonde(
-			'updater-jeton',
-			! $muets,
+			'updater-canal',
+			! $muets && ! $jamais_vus,
 			sprintf(
-				'dépôt inatteignable pour : %s. Jeton périmé, ou dépôt hors de sa portée — '
-					. 'sur tous les composants à la fois, c’est le jeton ; sur un seul, c’est sa portée.',
-				implode( ', ', $muets )
+				'%s%s',
+				$muets
+					? sprintf(
+						'dépôt inatteignable pour : %s. Les dépôts étant publics, ce n’est pas une question '
+							. 'de droit : dépôt renommé, nommé à tort dans la liste des composants, ou réseau '
+							. 'sortant fermé. ',
+						implode( ', ', $muets )
+					)
+					: '',
+				$jamais_vus
+					? sprintf(
+						'jamais vérifié(s) : %s — déclaré(s) au canal, absent(s) de l’état. Aucune passe n’a '
+							. 'tourné depuis leur ajout : lancer une vérification (Outils → Mises à jour du site).',
+						implode( ', ', $jamais_vus )
+					)
+					: ''
 			),
-			sprintf( 'canal ouvert — %d composant(s) joignable(s)', count( $composants ) )
+			sprintf(
+				'canal ouvert — %d/%d composant(s) déclaré(s) vérifié(s), quota %s%s',
+				count( $composants ),
+				count( $declares ),
+				$jeton ? 'relevé par une constante' : 'public (60 appels/h par IP, suffisant)',
+				$quotas ? sprintf( ' · %d en attente de quota, sans conséquence', count( $quotas ) ) : ''
+			)
 		);
 	}
 

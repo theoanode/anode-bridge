@@ -51,6 +51,110 @@ final class Bricks_Adapter {
 	];
 
 	/**
+	 * Préfixe de l'empreinte de ce que **nous** avons écrit, par zone.
+	 *
+	 * ## Pourquoi elle existe
+	 *
+	 * `set_elements()` remplace la zone visée. C'est cohérent avec le reste du
+	 * dispositif — on édite une source de vérité, on régénère, on applique — et
+	 * c'est **le trou du dispositif**, parce que la mise en page est justement ce
+	 * qu'un humain retouche le plus : on ouvre Bricks, on déplace un bloc, on
+	 * corrige un texte. La prochaine écriture l'effaçait sans un mot.
+	 *
+	 * Les commandes du dépôt ont leur garde depuis le 06/08/2026 (§10 bis) :
+	 * `apply-pages`, `apply-posts` et `apply-composants` refusent devant un écart.
+	 * Celle-ci manquait, et c'était la plus importante : un outil MCP, appelable
+	 * sans passer par aucun script.
+	 *
+	 * ## Ce qu'une empreinte permet de demander
+	 *
+	 * Comparer au dépôt ne marche pas : `bricks_set_page` reçoit un arbre
+	 * quelconque, qui ne vient pas forcément d'un fichier versionné. La seule
+	 * question posable est donc **« la zone a-t-elle changé depuis notre dernière
+	 * écriture ? »** — et elle demande de retenir ce qu'on a écrit.
+	 *
+	 * D'où trois cas, et le troisième est celui qu'on oublie :
+	 *
+	 * | État | Conduite |
+	 * |---|---|
+	 * | empreinte présente et **égale** au contenu servi | personne n'a touché depuis nous : on écrit |
+	 * | empreinte présente et **différente** | quelqu'un a touché : **on refuse**, sauf demande explicite |
+	 * | **aucune empreinte**, et la zone porte déjà du contenu | on ne sait pas d'où il vient : **on refuse**. Écrire serait effacer un travail dont on ignore l'auteur |
+	 *
+	 * Une zone vide sans empreinte s'écrit librement : il n'y a rien à perdre.
+	 *
+	 * ## Le sens de l'erreur qu'elle peut faire
+	 *
+	 * Un faux positif — refuser alors que rien n'a bougé — coûte une commande de
+	 * plus. Un faux négatif coûte un travail. L'empreinte penche donc du côté du
+	 * refus : elle porte sur les octets réellement stockés, sans tolérance.
+	 */
+	public const META_EMPREINTE = '_anode_empreinte_';
+
+	/**
+	 * Empreinte stable d'une structure d'éléments.
+	 *
+	 * Les clés associatives sont triées **récursivement** avant l'encodage : PHP et
+	 * `json_decode` ne garantissent pas l'ordre des clés d'un objet, et un simple
+	 * réordonnancement ferait crier la garde sur une zone que personne n'a touchée.
+	 * Les listes, elles, gardent leur ordre — c'est l'ordre des éléments d'une page,
+	 * et le changer *est* une modification.
+	 */
+	public static function empreinte( array $elements ): string {
+		return hash( 'sha256', (string) wp_json_encode( self::canoniser( $elements ) ) );
+	}
+
+	/**
+	 * @param mixed $valeur
+	 * @return mixed
+	 */
+	private static function canoniser( $valeur ) {
+		if ( ! is_array( $valeur ) ) {
+			return $valeur;
+		}
+
+		$trie = array_is_list( $valeur );
+
+		$valeur = array_map( [ self::class, 'canoniser' ], $valeur );
+
+		if ( ! $trie ) {
+			ksort( $valeur );
+		}
+
+		return $valeur;
+	}
+
+	/** L'empreinte retenue pour une zone, ou null si nous n'y avons jamais écrit. */
+	public static function empreinte_retenue( int $post_id, string $area ): ?string {
+		$retenue = get_post_meta( $post_id, self::META_EMPREINTE . $area, true );
+
+		return is_string( $retenue ) && '' !== $retenue ? $retenue : null;
+	}
+
+	/**
+	 * Le verdict, avant d'écrire.
+	 *
+	 * Rendu séparé de l'écriture à dessein : c'est une décision, elle se lit et
+	 * s'éprouve sans base de données ni requête HTTP.
+	 *
+	 * @param ?string $retenue  Empreinte de notre dernière écriture, ou null.
+	 * @param string  $servie   Empreinte du contenu actuellement en place.
+	 * @param bool    $vide     La zone est-elle vide ?
+	 * @return array{ecrire: bool, motif: string}
+	 */
+	public static function verdict( ?string $retenue, string $servie, bool $vide ): array {
+		if ( null === $retenue ) {
+			return $vide
+				? [ 'ecrire' => true, 'motif' => 'zone-vierge' ]
+				: [ 'ecrire' => false, 'motif' => 'provenance-inconnue' ];
+		}
+
+		return $retenue === $servie
+			? [ 'ecrire' => true, 'motif' => 'inchangee-depuis-nous' ]
+			: [ 'ecrire' => false, 'motif' => 'modifiee-a-la-main' ];
+	}
+
+	/**
 	 * Le thème Bricks est-il actif ?
 	 */
 	public static function is_available(): bool {
@@ -102,6 +206,19 @@ final class Bricks_Adapter {
 		$meta_key = self::AREAS[ $area ] ?? self::META_CONTENT;
 
 		update_post_meta( $post_id, $meta_key, $elements );
+
+		/*
+		 * On retient ce qu'on vient d'écrire, dans le même geste. C'est ce qui
+		 * permettra à la prochaine écriture de savoir si quelqu'un est passé entre
+		 * les deux — voir META_EMPREINTE.
+		 *
+		 * Posée ici et pas dans la route : toute écriture doit la mettre à jour, y
+		 * compris celle d'un template ou celle d'un futur appelant. Une écriture qui
+		 * oublierait l'empreinte laisserait la garde crier au prochain passage sur
+		 * une page que personne n'a touchée — un faux positif qui apprend à passer
+		 * outre, ce qui est la pire façon de perdre une garde.
+		 */
+		update_post_meta( $post_id, self::META_EMPREINTE . $area, self::empreinte( $elements ) );
 
 		// Bascule le post en mode Bricks si ce n'est pas déjà le cas.
 		if ( 'content' === $area && 'bricks' !== get_post_meta( $post_id, self::META_EDITOR_MODE, true ) ) {

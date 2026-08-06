@@ -54,6 +54,12 @@ final class Rest_Design_System {
 							'default'     => false,
 							'description' => 'Supprime les variables Bricks absentes des tokens.',
 						],
+						'overwrite' => [
+							'type'        => 'boolean',
+							'default'     => false,
+							'description' => 'Écrase une variable modifiée dans le builder depuis notre dernière '
+								. 'écriture. Sans lui, une telle variable fait répondre 409.',
+						],
 					],
 				],
 			]
@@ -133,7 +139,51 @@ final class Rest_Design_System {
 			);
 		}
 
+		/*
+		 * `ds_apply` écrit les variables **par sa propre route** : la garde posée sur
+		 * `/bricks/variables` ne la couvre donc pas. Une garde qui ne couvre pas tous
+		 * les chemins d'une même écriture est une garde qu'un chemin contourne — et
+		 * celui-ci est justement le chemin normal.
+		 *
+		 * Le différentiel dit déjà ce qui change ; ce qu'il ne dit pas, c'est **qui**
+		 * a fait changer la valeur en place. Une couleur retouchée dans le builder par
+		 * un client apparaît comme un simple écart à corriger.
+		 */
+		if ( ! (bool) $request->get_param( 'overwrite' ) ) {
+			$fautives = [];
+			$motif    = 'modifiee-a-la-main';
+
+			foreach ( $existing as $variable ) {
+				$nom = (string) ( $variable['name'] ?? '' );
+
+				if ( '' === $nom ) {
+					continue;
+				}
+
+				$verdict = Empreintes::verdict( 'variable:' . $nom, $variable );
+
+				if ( ! $verdict['ecrire'] ) {
+					$fautives[] = $nom;
+					$motif      = $verdict['motif'];
+				}
+			}
+
+			if ( $fautives ) {
+				return Empreintes::refus( $fautives, 'variable(s)', $motif );
+			}
+		}
+
 		Bricks_Adapter::set_variables( $diff['result'] );
+
+		$couples = [];
+
+		foreach ( $diff['result'] as $variable ) {
+			if ( isset( $variable['name'] ) ) {
+				$couples[ 'variable:' . (string) $variable['name'] ] = Bricks_Adapter::empreinte( $variable );
+			}
+		}
+
+		Empreintes::retenir( $couples );
 
 		// La palette Bricks (sélecteur de couleurs du builder) reprend les
 		// tokens de couleur, pour que le builder propose la charte du site.

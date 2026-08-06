@@ -36,6 +36,13 @@ final class Rest_Bricks {
 							'type'        => 'array',
 							'description' => 'Structure Bricks : tableau plat de nœuds reliés par parent/children.',
 						],
+						'overwrite' => [
+							'type'        => 'boolean',
+							'default'     => false,
+							'description' => 'Écrase une zone modifiée à la main depuis notre dernière écriture. '
+								. 'Sans lui, une telle zone fait répondre 409 : une modification faite à la main '
+								. 'ne se perd pas sans qu’on le demande.',
+						],
 					],
 				],
 			]
@@ -77,6 +84,13 @@ final class Rest_Bricks {
 						],
 						'categories' => [ 'type' => 'array' ],
 						'strict_bem' => [ 'type' => 'boolean', 'default' => true ],
+						'overwrite'  => [
+							'type'        => 'boolean',
+							'default'     => false,
+							'description' => 'Écrase une classe modifiée dans le builder depuis notre dernière '
+								. 'écriture. Sans lui, une telle classe fait répondre 409 — et l’appel remplace '
+								. 'les réglages d’une classe sans les fusionner.',
+						],
 					],
 				],
 			]
@@ -110,6 +124,11 @@ final class Rest_Bricks {
 					'permission_callback' => [ Security::class, 'permission_manage' ],
 					'args'                => [
 						'css' => [ 'required' => true, 'type' => 'string' ],
+						'overwrite'  => [
+							'type'        => 'boolean',
+							'default'     => false,
+							'description' => 'Écrase ce qui a été modifié à la main depuis notre dernière écriture. Sans lui, un tel écart fait répondre 409.',
+						],
 					],
 				],
 			]
@@ -145,6 +164,11 @@ final class Rest_Bricks {
 					'callback'            => [ $this, 'update_variables' ],
 					'permission_callback' => [ Security::class, 'permission_manage' ],
 					'args'                => [
+						'overwrite'  => [
+							'type'        => 'boolean',
+							'default'     => false,
+							'description' => 'Écrase ce qui a été modifié à la main depuis notre dernière écriture. Sans lui, un tel écart fait répondre 409.',
+						],
 						'variables'  => [ 'required' => true, 'type' => 'array' ],
 						'mode'       => [
 							'type'    => 'string',
@@ -181,6 +205,44 @@ final class Rest_Bricks {
 			]
 		);
 
+		/*
+		 * Basculer une publication entre Bricks et l'éditeur de WordPress.
+		 *
+		 * `_bricks_editor_mode` est volontairement **non inscriptible** par
+		 * `wp/v2` (voir `Plugin::expose_bricks_meta`) : un simple PUT sur cette
+		 * méta ferait disparaître la mise en page d'une page qui n'a pas changé
+		 * d'un octet. Le refus est la bonne conduite par défaut.
+		 *
+		 * Mais il n'existait alors **aucun** chemin pour la bascule légitime :
+		 * reprendre cinq articles construits en Bricks pour que leur texte
+		 * redevienne modifiable dans le back-office. Une opération nommée, avec
+		 * sa garde, vaut mieux qu'une méta libre — ou qu'un contournement SSH.
+		 *
+		 * La garde : on refuse de passer à « wordpress » tant que `post_content`
+		 * est vide. C'est exactement l'accident — le gabarit prend la main, et le
+		 * visiteur reçoit une page sans contenu. Mesuré le 06/08/2026 : cinq
+		 * articles servis avec un <main> de 539 octets.
+		 */
+		register_rest_route(
+			NAMESPACE_,
+			'/bricks/editor-mode',
+			[
+				[
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => [ $this, 'set_editor_mode' ],
+					'permission_callback' => [ Security::class, 'permission_manage' ],
+					'args'                => [
+						'id'   => [ 'required' => true, 'type' => 'integer' ],
+						'mode' => [
+							'required' => true,
+							'type'     => 'string',
+							'enum'     => [ 'bricks', 'wordpress' ],
+						],
+					],
+				],
+			]
+		);
+
 		register_rest_route(
 			NAMESPACE_,
 			'/bricks/components',
@@ -198,6 +260,13 @@ final class Rest_Bricks {
 					'callback'            => [ $this, 'upsert_component' ],
 					'permission_callback' => [ Security::class, 'permission_manage' ],
 					'args'                => [
+						'overwrite' => [
+							'type'        => 'boolean',
+							'default'     => false,
+							'description' => 'Écrase un composant modifié dans le builder depuis notre dernière '
+								. 'écriture. Sans lui, un tel composant fait répondre 409 — sa définition décide '
+								. 'du dessin de toutes ses instances.',
+						],
 						'label' => [
 							'required'    => true,
 							'type'        => 'string',
@@ -277,6 +346,12 @@ final class Rest_Bricks {
 							'type'        => 'array',
 							'description' => 'Conditions d’affichage Bricks. Par défaut : tout le site.',
 						],
+						'overwrite' => [
+							'type'        => 'boolean',
+							'default'     => false,
+							'description' => 'Écrase un template modifié à la main depuis notre dernière écriture. '
+								. 'Sans lui, un tel template fait répondre 409.',
+						],
 					],
 				],
 			]
@@ -303,6 +378,77 @@ final class Rest_Bricks {
 	/* ------------------------------------------------------------------ */
 	/* Contenu                                                             */
 	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Rien ne s'écrase sans qu'on le demande — la mise en page comprise.
+	 *
+	 * ## Pourquoi c'était le trou du dispositif
+	 *
+	 * Les commandes du dépôt ont leur garde depuis le 06/08/2026 (§10 bis) :
+	 * `apply-pages`, `apply-posts` et `apply-composants` refusent devant un écart et
+	 * nomment leurs sorties. Cette route, non — et c'est **la surface qu'un humain
+	 * retouche le plus** : on ouvre Bricks, on déplace un bloc, on corrige un texte.
+	 * La prochaine écriture l'effaçait sans un mot, sans même dire ce qui changeait.
+	 *
+	 * Ce n'est pas une négligence de mise en œuvre : c'était écrit noir sur blanc
+	 * dans la documentation — « `bricks_set_page` écrase la zone visée » —, présenté
+	 * comme une propriété de l'outil, avec pour seule parade une consigne de lire
+	 * avant d'écrire. Une consigne demande ; du code empêche.
+	 *
+	 * ## La forme du refus
+	 *
+	 * Un **409**, pas un 403 : il ne manque aucun droit, il y a un désaccord d'état.
+	 * Et le corps nomme les sorties, parce qu'un refus qui ne dit pas comment
+	 * avancer se contourne au hasard. `data` porte les empreintes : c'est ce qui
+	 * permet à un appelant de décider sans redemander la page.
+	 *
+	 * @param array<int, mixed> $servi     Contenu actuellement en place.
+	 * @param bool              $demande   L'appelant demande-t-il l'écrasement ?
+	 * @return true|\WP_Error
+	 */
+	private function refus_ecrasement( int $post_id, string $area, array $servi, bool $demande ) {
+		if ( $demande ) {
+			return true;
+		}
+
+		$retenue = Bricks_Adapter::empreinte_retenue( $post_id, $area );
+		$servie  = Bricks_Adapter::empreinte( $servi );
+		$verdict = Bricks_Adapter::verdict( $retenue, $servie, ! $servi );
+
+		if ( $verdict['ecrire'] ) {
+			return true;
+		}
+
+		$explication = 'modifiee-a-la-main' === $verdict['motif']
+			? sprintf(
+				'La zone « %s » a été modifiée depuis notre dernière écriture — dans Bricks, '
+					. 'ou dans le back-office. Écrire maintenant effacerait ce travail.',
+				$area
+			)
+			: sprintf(
+				'La zone « %s » porte déjà %d élément(s) que nous n’avons pas écrits : nous n’avons '
+					. 'aucune empreinte pour elle. Leur provenance est inconnue, donc écrire serait '
+					. 'effacer un travail dont on ignore l’auteur.',
+				$area,
+				count( $servi )
+			);
+
+		return new \WP_Error(
+			'anode_bridge_ecrasement',
+			$explication . ' Rien n’a été écrit.'
+				. ' Trois sorties : lire la zone et repartir de là (bricks_get_page) ;'
+				. ' écraser en le demandant (overwrite: true) ;'
+				. ' ou ne rien faire — l’écart reste, et il est nommé.',
+			[
+				'status'             => 409,
+				'motif'              => $verdict['motif'],
+				'area'               => $area,
+				'empreinte_retenue'  => $retenue,
+				'empreinte_servie'   => $servie,
+				'elements_en_place'  => count( $servi ),
+			]
+		);
+	}
 
 	public function get_content( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$post_id = (int) $request->get_param( 'id' );
@@ -356,6 +502,12 @@ final class Rest_Bricks {
 		}
 
 		$previous = Bricks_Adapter::get_elements( $post_id, $area );
+
+		$refus = $this->refus_ecrasement( $post_id, $area, $previous, (bool) $request->get_param( 'overwrite' ) );
+
+		if ( $refus instanceof \WP_Error ) {
+			return $refus;
+		}
 
 		Bricks_Adapter::set_elements( $post_id, $elements, $area );
 
@@ -573,6 +725,152 @@ final class Rest_Bricks {
 		return $usage;
 	}
 
+	/**
+	 * Les empreintes d'une liste d'entrées nommées — variables, et tout ce qui suit
+	 * la même forme.
+	 *
+	 * @param array<int, array<string, mixed>> $entrees
+	 * @return array<string, string>
+	 */
+	private static function empreintes_nommees( array $entrees, string $genre ): array {
+		$couples = [];
+
+		foreach ( $entrees as $entree ) {
+			if ( ! isset( $entree['name'] ) ) {
+				continue;
+			}
+
+			$couples[ $genre . ':' . (string) $entree['name'] ] = Bricks_Adapter::empreinte( $entree );
+		}
+
+		return $couples;
+	}
+
+	/**
+	 * Refuse d'écraser une variable retouchée dans le builder.
+	 *
+	 * @param array<int, array<string, mixed>> $incoming
+	 * @return true|\WP_Error
+	 */
+	private function refus_variables( array $incoming, bool $demande ) {
+		if ( $demande ) {
+			return true;
+		}
+
+		$index = [];
+
+		foreach ( Bricks_Adapter::get_variables() as $variable ) {
+			if ( isset( $variable['name'] ) ) {
+				$index[ (string) $variable['name'] ] = $variable;
+			}
+		}
+
+		$fautives = [];
+		$motif    = 'modifiee-a-la-main';
+
+		foreach ( $incoming as $entree ) {
+			$nom = (string) ( $entree['name'] ?? '' );
+
+			if ( '' === $nom || ! isset( $index[ $nom ] ) ) {
+				continue;
+			}
+
+			// Une variable dont la valeur est déjà celle qu'on veut écrire n'est pas un
+			// conflit : c'est le cas courant d'un `ds_apply` rejoué, et refuser là
+			// rendrait l'outil inutilisable.
+			if ( Bricks_Adapter::empreinte( $index[ $nom ] ) === Bricks_Adapter::empreinte( $entree ) ) {
+				continue;
+			}
+
+			$verdict = Empreintes::verdict( 'variable:' . $nom, $index[ $nom ] );
+
+			if ( ! $verdict['ecrire'] ) {
+				$fautives[] = $nom;
+				$motif      = $verdict['motif'];
+			}
+		}
+
+		return $fautives ? Empreintes::refus( $fautives, 'variable(s)', $motif ) : true;
+	}
+
+	/** Clé d'empreinte d'une classe globale. */
+	private static function cle_de_classe( string $nom ): string {
+		return 'classe:' . $nom;
+	}
+
+	/**
+	 * Les empreintes de toutes les classes d'une liste.
+	 *
+	 * @param array<int, array<string, mixed>> $classes
+	 * @return array<string, string>
+	 */
+	private static function empreintes_des_classes( array $classes ): array {
+		$couples = [];
+
+		foreach ( $classes as $classe ) {
+			if ( ! isset( $classe['name'] ) ) {
+				continue;
+			}
+
+			$couples[ self::cle_de_classe( (string) $classe['name'] ) ] = Bricks_Adapter::empreinte( $classe );
+		}
+
+		return $couples;
+	}
+
+	/**
+	 * Refuse d'écraser une classe retouchée à la main.
+	 *
+	 * Une classe **absente** du site n'est pas concernée : la créer n'efface rien.
+	 * Une classe présente **sans réglages** ne l'est pas non plus — c'est une
+	 * coquille créée par `create_missing_classes`, et l'habiller est précisément ce
+	 * qu'on attend (§15 bis).
+	 *
+	 * @param array<int, array<string, mixed>> $incoming
+	 * @return true|\WP_Error
+	 */
+	private function refus_classes( array $incoming, bool $demande ) {
+		if ( $demande ) {
+			return true;
+		}
+
+		$index = [];
+
+		foreach ( Bricks_Adapter::get_global_classes() as $classe ) {
+			if ( isset( $classe['name'] ) ) {
+				$index[ (string) $classe['name'] ] = $classe;
+			}
+		}
+
+		$fautives = [];
+		$motif    = 'modifiee-a-la-main';
+
+		foreach ( $incoming as $entree ) {
+			$nom = (string) ( $entree['name'] ?? '' );
+
+			if ( '' === $nom || ! isset( $index[ $nom ] ) ) {
+				continue;
+			}
+
+			$servie = $index[ $nom ];
+
+			// Une coquille vide n'a rien à perdre : c'est le cas normal après
+			// `create_missing_classes`, et refuser ici bloquerait tout habillage.
+			if ( empty( $servie['settings'] ) ) {
+				continue;
+			}
+
+			$verdict = Empreintes::verdict( self::cle_de_classe( $nom ), $servie );
+
+			if ( ! $verdict['ecrire'] ) {
+				$fautives[] = $nom;
+				$motif      = $verdict['motif'];
+			}
+		}
+
+		return $fautives ? Empreintes::refus( $fautives, 'classe(s)', $motif ) : true;
+	}
+
 	public function update_classes( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$incoming = Validator::global_classes(
 			$request->get_param( 'classes' ),
@@ -601,6 +899,25 @@ final class Rest_Bricks {
 			}
 		}
 
+		/*
+		 * Rien ne s'écrase sans qu'on le demande — les classes aussi (§10 bis).
+		 *
+		 * `merge_by_name` **réassigne l'entrée entière** et ne conserve que son `id` :
+		 * envoyer une classe avec un seul réglage efface tous les autres, et l'appel
+		 * répond « 1 mise(s) à jour ». Le piège est documenté depuis longtemps, avec
+		 * pour parade une consigne — lire les réglages par la route REST avant
+		 * d'écrire. Une consigne demande ; du code empêche.
+		 *
+		 * La garde est **par classe** : refuser celle-là sans bloquer les quarante
+		 * autres d'une même passe. Une garde qui empêche le travail normal est une
+		 * garde qu'on désactive.
+		 */
+		$refus = $this->refus_classes( $incoming, (bool) $request->get_param( 'overwrite' ) );
+
+		if ( $refus instanceof \WP_Error ) {
+			return $refus;
+		}
+
 		if ( 'replace' === $mode ) {
 			/*
 			 * Même en remplacement, une classe reconnue par son nom garde son
@@ -616,6 +933,17 @@ final class Rest_Bricks {
 		}
 
 		Bricks_Adapter::set_global_classes( $result );
+
+		/*
+		 * On retient ce qu'on vient d'écrire, dans le même geste — sinon la garde
+		 * criera au passage suivant sur une classe que personne n'a touchée, et un
+		 * faux positif apprend à passer outre.
+		 *
+		 * On relit `$result` plutôt que `$incoming` : c'est ce qui est réellement en
+		 * base, `id` repris compris. Retenir l'entrant produirait une empreinte que
+		 * la lecture suivante ne retrouverait jamais.
+		 */
+		Empreintes::retenir( self::empreintes_des_classes( $result ) );
 
 		if ( null !== $categories ) {
 			Bricks_Adapter::set_class_categories( $categories );
@@ -747,6 +1075,18 @@ final class Rest_Bricks {
 			}
 		}
 
+		/*
+		 * Même garde que les classes (§10 bis). La §9 dit qu'on ne modifie jamais une
+		 * variable dans le builder — mais elle le dit à nous, et un client qui achète
+		 * son site n'a pas lu la §9. `ds_apply` reviendrait alors sur sa couleur, et
+		 * la seule trace serait un différentiel que personne ne relit.
+		 */
+		$refus = $this->refus_variables( $incoming, (bool) $request->get_param( 'overwrite' ) );
+
+		if ( $refus instanceof \WP_Error ) {
+			return $refus;
+		}
+
 		if ( 'replace' === $mode ) {
 			$result  = $incoming;
 			$added   = count( $incoming );
@@ -756,6 +1096,8 @@ final class Rest_Bricks {
 		}
 
 		Bricks_Adapter::set_variables( $result );
+
+		Empreintes::retenir( self::empreintes_nommees( $result, 'variable' ) );
 
 		if ( null !== $categories ) {
 			Bricks_Adapter::set_variable_categories( $categories );
@@ -954,10 +1296,28 @@ final class Rest_Bricks {
 		$reglages = get_option( Bricks_Adapter::OPT_GLOBAL_SETTINGS, [] );
 		$reglages = is_array( $reglages ) ? $reglages : [];
 
+		/*
+		 * Le CSS global se garde **en bloc** : il est écrit en bloc, et c'est là que
+		 * vivent les règles qu'aucun contrôle de panneau ne porte (§5, rang 4). Une
+		 * règle ajoutée à la main depuis le builder y est donc parfaitement
+		 * légitime — et c'était exactement ce qu'une réécriture effaçait.
+		 */
+		$actuel = (string) wp_unslash( (string) ( $reglages['customCss'] ?? '' ) );
+
+		if ( ! (bool) $request->get_param( 'overwrite' ) ) {
+			$verdict = Empreintes::verdict( 'css-global', $actuel );
+
+			if ( ! $verdict['ecrire'] ) {
+				return Empreintes::refus( [ 'CSS personnalisé global' ], 'le CSS global', $verdict['motif'] );
+			}
+		}
+
 		$reglages['customCss'] = wp_slash( $css );
 
 		// `null` : l'autoload de l'option reste ce qu'il était (voir plus haut).
 		update_option( Bricks_Adapter::OPT_GLOBAL_SETTINGS, $reglages, null );
+
+		Empreintes::retenir( [ 'css-global' => Bricks_Adapter::empreinte( [ $css ] ) ] );
 
 		Bricks_Adapter::regenerate_css();
 
@@ -1157,6 +1517,51 @@ final class Rest_Bricks {
 	/* Composants                                                          */
 	/* ------------------------------------------------------------------ */
 
+	/**
+	 * Bascule une publication entre Bricks et l'éditeur de WordPress.
+	 *
+	 * @param \WP_REST_Request $request
+	 * @return \WP_REST_Response|\WP_Error
+	 */
+	public function set_editor_mode( \WP_REST_Request $request ) {
+		$post_id = (int) $request->get_param( 'id' );
+		$mode    = (string) $request->get_param( 'mode' );
+		$post    = get_post( $post_id );
+
+		if ( ! $post ) {
+			return new \WP_Error( 'bricks_post_absent', "Publication {$post_id} introuvable.", [ 'status' => 404 ] );
+		}
+
+		/*
+		 * La garde. Rendre la main à WordPress sur une publication dont le
+		 * `post_content` est vide, c'est servir une page vide : la mise en page
+		 * vit dans les métas de Bricks, que l'éditeur ne lit pas.
+		 */
+		if ( 'wordpress' === $mode && '' === trim( (string) $post->post_content ) ) {
+			return new \WP_Error(
+				'bricks_contenu_vide',
+				"« {$post->post_title} » n'a aucun contenu d'éditeur : repasser à WordPress "
+					. 'servirait une page vide. Écrire post_content AVANT de basculer.',
+				[ 'status' => 409 ]
+			);
+		}
+
+		if ( 'bricks' === $mode ) {
+			update_post_meta( $post_id, Bricks_Adapter::META_EDITOR_MODE, 'bricks' );
+		} else {
+			delete_post_meta( $post_id, Bricks_Adapter::META_EDITOR_MODE );
+		}
+
+		return new \WP_REST_Response(
+			[
+				'id'          => $post_id,
+				'editor_mode' => get_post_meta( $post_id, Bricks_Adapter::META_EDITOR_MODE, true ) ?: 'wordpress',
+				'message'     => "« {$post->post_title} » s'édite désormais avec "
+					. ( 'bricks' === $mode ? 'Bricks.' : 'l’éditeur de WordPress.' ),
+			]
+		);
+	}
+
 	public function list_components( \WP_REST_Request $request ): \WP_REST_Response {
 		$with_elements = (bool) $request->get_param( 'with_elements' );
 		$instances     = $this->count_component_instances();
@@ -1271,6 +1676,24 @@ final class Rest_Bricks {
 			return $component;
 		}
 
+		/*
+		 * Même garde (§10 bis). Un composant est **partagé** : sa définition décide du
+		 * dessin de ses trente-sept instances. L'écraser sans le demander défait donc
+		 * une correction en trente-sept endroits d'un coup — et l'appel étant
+		 * idempotent sur le nom, rien ne distingue « je repose la même définition » de
+		 * « j'efface celle qui a été retouchée ».
+		 *
+		 * La garde ne joue que sur une **mise à jour** : un composant qui n'existe pas
+		 * n'a rien à perdre.
+		 */
+		if ( null !== $position && ! (bool) $request->get_param( 'overwrite' ) ) {
+			$verdict = Empreintes::verdict( 'composant:' . $label, $existing[ $position ] );
+
+			if ( ! $verdict['ecrire'] ) {
+				return Empreintes::refus( [ $label ], 'composant(s)', $verdict['motif'] );
+			}
+		}
+
 		if ( null !== $position ) {
 			$existing[ $position ] = $component;
 		} else {
@@ -1279,6 +1702,8 @@ final class Rest_Bricks {
 		}
 
 		Bricks_Adapter::set_components( $existing );
+
+		Empreintes::retenir( [ 'composant:' . $label => Bricks_Adapter::empreinte( $component ) ] );
 
 		$instances = $this->count_component_instances();
 
@@ -1710,6 +2135,23 @@ final class Rest_Bricks {
 		$area = in_array( $type, [ 'header', 'footer' ], true ) ? $type : 'content';
 
 		if ( $elements ) {
+			/*
+			 * La même garde qu'une page : un template est une mise en page comme une
+			 * autre, retouchée dans le même builder. La laisser hors du champ aurait
+			 * déplacé le trou au lieu de le fermer — et un gabarit d'archive corrigé à
+			 * la main est exactement le genre de travail qu'on ne refait pas deux fois.
+			 */
+			$refus = $this->refus_ecrasement(
+				$template_id,
+				$area,
+				Bricks_Adapter::get_elements( $template_id, $area ),
+				(bool) $request->get_param( 'overwrite' )
+			);
+
+			if ( $refus instanceof \WP_Error ) {
+				return $refus;
+			}
+
 			Bricks_Adapter::set_elements( $template_id, $elements, $area );
 		}
 

@@ -1,28 +1,22 @@
 # anode-bridge
 
-> **Miroir généré — ne pas modifier ici.**
->
-> La source vit dans le dépôt `wordpress`, sous
-> `plugin/anode-bridge`.
-> Ce dépôt est régénéré à chaque publication par
-> `bin/release-mu-plugin.mjs`. Une modification faite ici serait écrasée.
+Dépôt de distribution. Le contenu est régénéré à la publication ;
+toute retouche faite ici est perdue au passage suivant.
 
-## À quoi il sert
+## Contenu d’une release
 
-Il porte les **releases** que `anode-updater` installe sur les sites.
-Chaque release publie :
+| Fichier | Rôle |
+|---|---|
+| `.zip` | l’extension, sans ses tests |
+| `.zip.sha256` | empreinte, contrôlée avant d’écrire sur le disque |
+| `.zip.sig` | signature, contrôlée quand la clé publique est en place |
 
-```
-<composant>-<version>.zip           le dossier du composant, tests exclus
-<composant>-<version>.zip.sha256    son empreinte, vérifiée avant installation
-<composant>-<version>.zip.sig       sa signature Ed25519, si le parc est armé
-```
+## Étiquettes
 
-Les tags sont de la forme `v1.2.0` : ce dépôt n’héberge qu’un composant.
+Une seule extension ici : l’étiquette ne porte que le numéro.
 
-## Installation manuelle
+## Pose à la main
 
-Elle ne devrait pas être nécessaire — `anode-updater` s’en charge. Au besoin,
-décompresser l’archive dans `wp-content/mu-plugins/`.
-
+Le site le fait seul. En dépannage, l’archive se décompresse dans
+`wp-content/mu-plugins/`.
 
